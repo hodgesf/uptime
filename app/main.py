@@ -176,7 +176,7 @@ async def dashboard():
                                 <td class="status-cell"></td>
                                 <td class="status-since"></td>
                                 <td class="state-time"></td>
-                                <td class="code-version"></td>
+                                <td><div class="code-version"></div></td>
                             `;
                             tbody.appendChild(row);
                             rowRefs[m.url] = {
@@ -510,9 +510,9 @@ async def run_check(monitor_id: int, url: str):
                             build_dt, biolink, dataset_version = parse_build_metadata(desc)
 
                             rows.append(
-                                f"name: {name}\n "
-                                f"version: {dataset_version or 'unknown'}\n "
-                                f"biolink: {biolink or 'unknown'}\n "
+                                f"name: {name}\n"
+                                f"version: {dataset_version or 'unknown'}\n"
+                                f"biolink: {biolink or 'unknown'}\n"
                                 f"build date: {build_dt or 'unknown'}"
                             )
 
@@ -555,9 +555,9 @@ async def run_check(monitor_id: int, url: str):
                         build_dt, biolink, dataset_version = parse_build_metadata(desc)
 
                         rows.append(
-                            f"name: {name}\n "
-                            f"version: {dataset_version or 'unknown'}\n "
-                            f"biolink: {biolink or 'unknown'}\n "
+                            f"name: {name}\n"
+                            f"version: {dataset_version or 'unknown'}\n"
+                            f"biolink: {biolink or 'unknown'}\n"
                             f"build date: {build_dt or 'unknown'}"
                         )
 
