@@ -28,6 +28,37 @@ import os
 
 SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL")
 
+import re
+from urllib.parse import urlparse
+
+def parse_build_metadata(description: str):
+    build_dt = None
+    biolink = None
+    dataset_version = None
+
+    # Build datetime
+    m = re.search(r"done on ([0-9\-:\. ]+)", description)
+    if m:
+        build_dt = m.group(1)
+
+    # Biolink version
+    m = re.search(r"Biolink version used was ([0-9\.]+)", description)
+    if m:
+        biolink = m.group(1)
+
+    # KG2 pattern (kg2c-2.10.2-v1.0)
+    m = re.search(r"kg2c-([\d\.]+-v[\d\.]+)", description)
+    if m:
+        dataset_version = m.group(1)
+
+    # Multiomics pattern (_v3.1.34.tsv or _v0.5.2.tsv etc)
+    if not dataset_version:
+        m = re.search(r"_v([\d\.]+)\.tsv", description)
+        if m:
+            dataset_version = m.group(1)
+
+    return build_dt, biolink, dataset_version
+
 async def send_slack_message(text: str):
     if not SLACK_WEBHOOK:
         return
@@ -463,9 +494,22 @@ async def run_check(monitor_id: int, url: str):
                     if cv.status_code == 200:
                         data = cv.json()
                         build_nodes = data.get("endpoint_build_nodes", {})
-                        if build_nodes:
-                            first_node = next(iter(build_nodes.values()))
-                            m.code_version = first_node.get("description")
+
+                        rows = []
+
+                        for name, node in build_nodes.items():
+                            desc = node.get("description", "")
+
+                            build_dt, biolink, dataset_version = parse_build_metadata(desc)
+
+                            rows.append(
+                                f"{name} → "
+                                f"{dataset_version or 'unknown'} | "
+                                f"{biolink or 'unknown'} | "
+                                f"{build_dt or 'unknown'}"
+                            )
+
+                        m.code_version = "\n".join(rows)
                 except Exception:
                     pass
 
@@ -496,9 +540,21 @@ async def run_check(monitor_id: int, url: str):
                 if cv.status_code == 200:
                     data = cv.json()
                     build_nodes = data.get("endpoint_build_nodes", {})
-                    if build_nodes:
-                        first_node = next(iter(build_nodes.values()))
-                        m.code_version = first_node.get("description")
+
+                    rows = []
+
+                    for name, node in build_nodes.items():
+                        desc = node.get("description", "")
+                        build_dt, biolink, dataset_version = parse_build_metadata(desc)
+
+                        rows.append(
+                            f"{name} → "
+                            f"{dataset_version or 'unknown'} | "
+                            f"{biolink or 'unknown'} | "
+                            f"{build_dt or 'unknown'}"
+                        )
+
+                    m.code_version = "\n".join(rows)
             except Exception:
                 pass
 
