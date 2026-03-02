@@ -18,6 +18,7 @@ ENDPOINTS = [
     "https://kg2cploverdb.ci.transltr.io",
     "https://kg2cploverdb.test.transltr.io",
     "https://kg2cplover3.rtx.ai:9990",
+    "http://ploverdev.rtx.ai:9991",
     "https://multiomics.rtx.ai:9990",
     "https://multiomics.ci.transltr.io",
 ]
@@ -527,7 +528,7 @@ async def run_check(monitor_id: int, url: str):
                                 f"name: {name}\n"
                                 f"version: {dataset_version or 'unknown'}\n"
                                 f"biolink: {biolink or 'unknown'}\n"
-                                f"build date: {build_dt or 'unknown'}\n"
+                                f"build date: {build_dt[:10] or 'unknown'}"
                             )
 
                         m.code_version = "\n".join(rows)
@@ -572,7 +573,7 @@ async def run_check(monitor_id: int, url: str):
                             f"name: {name}\n"
                             f"version: {dataset_version or 'unknown'}\n"
                             f"biolink: {biolink or 'unknown'}\n"
-                            f"build date: {build_dt or 'unknown'}"
+                            f"build date: {build_dt[:10] or 'unknown'}"
                         )
 
                     m.code_version = "\n".join(rows)
