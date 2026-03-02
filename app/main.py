@@ -527,10 +527,10 @@ async def run_check(monitor_id: int, url: str):
                                 f"name: {name}\n"
                                 f"version: {dataset_version or 'unknown'}\n"
                                 f"biolink: {biolink or 'unknown'}\n"
-                                f"build date: {build_dt or 'unknown'}"
+                                f"build date: {build_dt or 'unknown'}\n"
                             )
 
-                        m.code_version = "\n\n".join(rows)
+                        m.code_version = "\n".join(rows)
                 except Exception:
                     pass
 
