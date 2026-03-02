@@ -11,7 +11,7 @@ class Monitor(Base):
     url = Column(String, nullable=False)
     interval_seconds = Column(Integer, default=30)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
+    code_version = Column(String, nullable=True)
 
     is_up = Column(Boolean, default=None)
     last_state_change_ts = Column(BigInteger)
@@ -28,6 +28,7 @@ class Check(Base):
     status_code = Column(Integer)
     response_time_ms = Column(Integer)
     checked_at = Column(DateTime(timezone=True), server_default=func.now())
+    error_message = Column(String, nullable=True)
 
     monitor = relationship("Monitor", back_populates="checks")
 

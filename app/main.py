@@ -117,6 +117,7 @@ async def dashboard():
                     <th>Status</th>
                     <th>Status Since</th>
                     <th>Duration</th>
+                    <th>Code Version</th>
                 </tr>
             </thead>
             <tbody id="monitor-body"></tbody>
@@ -129,7 +130,6 @@ async def dashboard():
                     const res = await fetch("/status");
                     const data = await res.json();
                     const tbody = document.getElementById("monitor-body");
-
                     data.forEach(m => {
                         if (!rowRefs[m.url]) {
                             const row = document.createElement("tr");
@@ -138,17 +138,20 @@ async def dashboard():
                                 <td class="status-cell"></td>
                                 <td class="status-since"></td>
                                 <td class="state-time"></td>
+                                <td class="code-version"></td>
                             `;
                             tbody.appendChild(row);
                             rowRefs[m.url] = {
                                 statusCell: row.querySelector(".status-cell"),
                                 sinceCell: row.querySelector(".status-since"),
                                 timeCell: row.querySelector(".state-time"),
+                                codeCell: row.querySelector(".code-version"),
                                 ts: m.last_state_change_ts
                             };
                         }
 
                         const ref = rowRefs[m.url];
+                        
                         if (m.is_up === null) {
                             ref.statusCell.textContent = 'CHECKING...';
                             ref.statusCell.className = 'pending';
@@ -158,6 +161,7 @@ async def dashboard():
                         }
                         ref.sinceCell.textContent = m.last_state_change_str;
                         ref.ts = m.last_state_change_ts;
+                        ref.codeCell.textContent = m.code_version || "—";
                     });
                 } catch (e) { console.error(e); }
             }
@@ -180,6 +184,7 @@ async def dashboard():
             loadStatus();
             setInterval(loadStatus, 5000);
             setInterval(updateTimers, 1000);
+            
         </script>
     </body>
     </html>
@@ -373,11 +378,12 @@ async def status():
             else:
                 change_str = "Pending"
             result.append({
-                "id": m.id, 
-                "url": m.url, 
-                "is_up": m.is_up, 
-                "last_state_change_ts": m.last_state_change_ts or 0, 
-                "last_state_change_str": change_str
+                "id": m.id,
+                "url": m.url,
+                "is_up": m.is_up,
+                "last_state_change_ts": m.last_state_change_ts or 0,
+                "last_state_change_str": change_str,
+                "code_version": m.code_version
             })
         return result
 
@@ -395,18 +401,21 @@ async def checker_loop():
             traceback.print_exc()
         await asyncio.sleep(CHECK_INTERVAL)
 
+FAIL_THRESHOLD = 2  # require N consecutive failures before marking DOWN
+
 async def run_check(monitor_id: int, url: str):
     start = time.perf_counter()
+    code = 0
+    error_message = None
+
     try:
         r = await http_client.get(url, follow_redirects=True, timeout=10.0)
         code = r.status_code
-        print(f"[CHECK {monitor_id}] {url} -> {code}")
     except Exception as ex:
-        code = 0
-        print(f"[CHECK {monitor_id}] {url} -> FAILED: {ex}")
+        error_message = repr(ex)
 
     dur = int((time.perf_counter() - start) * 1000)
-    up = 0 < code < 400
+    is_success = 0 < code < 400
 
     async with AsyncSessionLocal() as session:
         m = await session.get(Monitor, monitor_id)
@@ -415,37 +424,83 @@ async def run_check(monitor_id: int, url: str):
 
         previous_state = m.is_up
 
-        # First ever check → set state but DO NOT notify
+        # count recent consecutive failures
+        recent_checks = (
+            await session.execute(
+                select(Check)
+                .where(Check.monitor_id == monitor_id)
+                .order_by(Check.id.desc())
+                .limit(FAIL_THRESHOLD - 1)
+            )
+        ).scalars().all()
+
+        consecutive_failures = 0
+        if not is_success:
+            consecutive_failures = 1
+            for c in recent_checks:
+                if c.status_code == 0:
+                    consecutive_failures += 1
+                else:
+                    break
+
+        confirmed_up = is_success
+        confirmed_down = (not is_success) and consecutive_failures >= FAIL_THRESHOLD
+
+        # first check
         if previous_state is None:
-            m.is_up = up
+            m.is_up = confirmed_up
             m.last_state_change_ts = int(time.time())
             session.add(StateEvent(
                 monitor_id=monitor_id,
-                is_up=up,
+                is_up=confirmed_up,
                 changed_at_ts=m.last_state_change_ts
             ))
 
-        # Real transition (UP→DOWN or DOWN→UP)
-        elif previous_state != up:
-            m.is_up = up
+            # fetch code version on first successful initialization
+            if confirmed_up:
+                try:
+                    cv = await http_client.get(f"{url}/code_version", timeout=5.0)
+                    if cv.status_code == 200:
+                        m.code_version = cv.json().get("code_info")
+                except Exception:
+                    pass
+
+        # transition to DOWN (only after threshold)
+        elif previous_state and confirmed_down:
+            m.is_up = False
             m.last_state_change_ts = int(time.time())
             session.add(StateEvent(
                 monitor_id=monitor_id,
-                is_up=up,
+                is_up=False,
+                changed_at_ts=m.last_state_change_ts
+            ))
+            await send_slack_message(f"{url} is DOWN")
+
+        # transition to UP immediately on success
+        elif not previous_state and confirmed_up:
+            m.is_up = True
+            m.last_state_change_ts = int(time.time())
+            session.add(StateEvent(
+                monitor_id=monitor_id,
+                is_up=True,
                 changed_at_ts=m.last_state_change_ts
             ))
 
-            if not up:
-                await send_slack_message(f"🚨 {url} is DOWN")
-            else:
-                await send_slack_message(f"✅ {url} is BACK UP")
+            # fetch code version once on recovery
+            try:
+                cv = await http_client.get(f"{url}/code_version", timeout=5.0)
+                if cv.status_code == 200:
+                    m.code_version = cv.json().get("code_info")
+            except Exception:
+                pass
 
-            print(f"[CHECK {monitor_id}] State changed to {up}")
+            await send_slack_message(f"{url} is BACK UP")
 
         session.add(Check(
             monitor_id=monitor_id,
             status_code=code,
-            response_time_ms=dur
+            response_time_ms=dur,
+            error_message=error_message
         ))
 
         await session.commit()
