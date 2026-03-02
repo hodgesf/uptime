@@ -138,7 +138,32 @@ async def dashboard():
             .down { color: #ef4444; font-weight: bold; }
             .pending { color: #9ca3af; font-weight: bold; font-style: italic; }
             a { color: #4f46e5; text-decoration: none; font-weight: 500; }
-            .code-version {
+            .endpoint-link {
+                color: #4f46e5;
+                font-size: 0.9em;
+                font-weight: 500;
+            }
+            .endpoint-link:hover {
+                text-decoration: underline;
+            }
+            .code-version-container {
+                cursor: pointer;
+                user-select: none;
+            }
+            .code-version-summary {
+                font-weight: 500;
+                color: #4f46e5;
+                padding: 4px 8px;
+                border-radius: 4px;
+                display: inline-block;
+                background: #f0f4ff;
+                border: 1px solid #ddd;
+            }
+            .code-version-summary:hover {
+                background: #e8eeff;
+            }
+            .code-version-details {
+                display: none;
                 max-width: 450px;
                 max-height: 120px;
                 overflow-y: auto;
@@ -147,17 +172,20 @@ async def dashboard():
                 padding: 8px;
                 border: 1px solid #ddd;
                 background: #fafafa;
-                position: relative;
+                margin-top: 8px;
+                border-radius: 4px;
             }
-
-            /* subtle fade at bottom to indicate more content */
-            .code-version::after {
-                content: "";
-                position: sticky;
-                bottom: 0;
+            .code-version-details.expanded {
                 display: block;
-                height: 20px;
-                background: linear-gradient(to bottom, rgba(250,250,250,0), rgba(250,250,250,1));
+            }
+            .code-version-toggle::before {
+                content: '▶ ';
+                margin-right: 4px;
+                display: inline-block;
+                transition: transform 0.2s;
+            }
+            .code-version-toggle.expanded::before {
+                transform: rotate(90deg);
             }
         </style>
     </head>
@@ -171,6 +199,7 @@ async def dashboard():
                     <th>Status Since</th>
                     <th>Duration</th>
                     <th>Code Version</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody id="monitor-body"></tbody>
@@ -191,14 +220,23 @@ async def dashboard():
                                 <td class="status-cell"></td>
                                 <td class="status-since"></td>
                                 <td class="state-time"></td>
-                                <td><div class="code-version"></div></td>
+                                <td>
+                                    <div class="code-version-container">
+                                        <div class="code-version-summary code-version-toggle"></div>
+                                        <div class="code-version-details"></div>
+                                    </div>
+                                </td>
+                                <td><a href="${m.url}" target="_blank" rel="noopener noreferrer" class="endpoint-link">visit endpoint</a></td>
                             `;
                             tbody.appendChild(row);
                             rowRefs[m.url] = {
                                 statusCell: row.querySelector(".status-cell"),
                                 sinceCell: row.querySelector(".status-since"),
                                 timeCell: row.querySelector(".state-time"),
-                                codeCell: row.querySelector(".code-version"),
+                                codeSummary: row.querySelector(".code-version-summary"),
+                                codeDetails: row.querySelector(".code-version-details"),
+                                codeToggle: row.querySelector(".code-version-toggle"),
+                                codeContainer: row.querySelector(".code-version-container"),
                                 ts: m.last_state_change_ts
                             };
                         }
@@ -214,7 +252,32 @@ async def dashboard():
                         }
                         ref.sinceCell.textContent = m.last_state_change_str;
                         ref.ts = m.last_state_change_ts;
-                        ref.codeCell.textContent = m.code_version || "—";
+                        
+                        // Extract build date from code_version (look for "done on" followed by date)
+                        const codeVersionText = m.code_version || "—";
+                        let buildDate = "Unknown";
+                        const dateMatch = codeVersionText.match(/done on\s+(\d{4}-\d{2}-\d{2})/);
+                        if (dateMatch) {
+                            buildDate = dateMatch[1];
+                        } else {
+                            // Fallback: look for any date pattern in YYYY-MM-DD format
+                            const anyDateMatch = codeVersionText.match(/(\d{4}-\d{2}-\d{2})/);
+                            if (anyDateMatch) {
+                                buildDate = anyDateMatch[1];
+                            }
+                        }
+                        
+                        ref.codeSummary.textContent = buildDate;
+                        ref.codeDetails.innerHTML = codeVersionText;
+                        
+                        // Add click handler for toggle (only once)
+                        if (!ref.codeContainer.hasClickHandler) {
+                            ref.codeContainer.addEventListener('click', () => {
+                                ref.codeToggle.classList.toggle('expanded');
+                                ref.codeDetails.classList.toggle('expanded');
+                            });
+                            ref.codeContainer.hasClickHandler = true;
+                        }
                     });
                 } catch (e) { console.error(e); }
             }
@@ -525,7 +588,7 @@ async def run_check(monitor_id: int, url: str):
                             build_dt, biolink, dataset_version = parse_build_metadata(desc)
 
                             rows.append(
-                                f"name: {name}\n"
+                                f"<strong>name:</strong> {name}\n"
                                 f"version: {dataset_version or 'unknown'}\n"
                                 f"biolink: {biolink or 'unknown'}\n"
                                 f"build date: {build_dt[:10] or 'unknown'}"
@@ -570,7 +633,7 @@ async def run_check(monitor_id: int, url: str):
                         build_dt, biolink, dataset_version = parse_build_metadata(desc)
 
                         rows.append(
-                            f"name: {name}\n"
+                            f"<strong>name:</strong> {name}\n"
                             f"version: {dataset_version or 'unknown'}\n"
                             f"biolink: {biolink or 'unknown'}\n"
                             f"build date: {build_dt[:10] or 'unknown'}"
