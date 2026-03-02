@@ -494,7 +494,11 @@ async def run_check(monitor_id: int, url: str):
             try:
                 cv = await http_client.get(f"{url}/code_version", timeout=5.0)
                 if cv.status_code == 200:
-                    m.code_version = cv.json().get("code_info")
+                    data = cv.json()
+                    build_nodes = data.get("endpoint_build_nodes", {})
+                    if build_nodes:
+                        first_node = next(iter(build_nodes.values()))
+                        m.code_version = first_node.get("description")
             except Exception:
                 pass
 
