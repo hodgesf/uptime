@@ -531,7 +531,7 @@ async def run_check(monitor_id: int, url: str):
                                 f"build date: {build_dt[:10] or 'unknown'}"
                             )
 
-                        m.code_version = "\n".join(rows)
+                        m.code_version = "\n\n".join(rows)
                 except Exception:
                     pass
 
@@ -576,7 +576,7 @@ async def run_check(monitor_id: int, url: str):
                             f"build date: {build_dt[:10] or 'unknown'}"
                         )
 
-                    m.code_version = "\n".join(rows)
+                    m.code_version = "\n\n".join(rows)
             except Exception:
                 pass
 
