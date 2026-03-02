@@ -18,31 +18,52 @@ ENDPOINTS = [
     "https://kg2cploverdb.ci.transltr.io",
     "https://kg2cploverdb.test.transltr.io",
     "https://kg2cplover3.rtx.ai:9990",
-    "https://kg2cplover.rtx.ai:9990",
     "https://multiomics.rtx.ai:9990",
     "https://multiomics.ci.transltr.io",
 ]
 
 http_client = httpx.AsyncClient(timeout=10, verify=False)
 
+import os
+
+SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL")
+
+async def send_slack_message(text: str):
+    if not SLACK_WEBHOOK:
+        return
+    try:
+        await http_client.post(SLACK_WEBHOOK, json={"text": text})
+    except Exception:
+        pass
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Monitor))
-        existing = {m.url for m in result.scalars().all()}
+        monitors = result.scalars().all()
+
+        existing_urls = {m.url for m in monitors}
+
+        # Add missing
         for url in ENDPOINTS:
-            if url not in existing:
+            if url not in existing_urls:
                 session.add(Monitor(
-                    url=url, 
-                    interval_seconds=CHECK_INTERVAL, 
+                    url=url,
+                    interval_seconds=CHECK_INTERVAL,
                     is_up=None,
                     last_state_change_ts=None
                 ))
+
+        # Delete removed
+        for m in monitors:
+            if m.url not in ENDPOINTS:
+                await session.delete(m)
+
         await session.commit()
-    
+
     checker_task = asyncio.create_task(checker_loop())
     yield
     checker_task.cancel()
@@ -383,15 +404,48 @@ async def run_check(monitor_id: int, url: str):
     except Exception as ex:
         code = 0
         print(f"[CHECK {monitor_id}] {url} -> FAILED: {ex}")
+
     dur = int((time.perf_counter() - start) * 1000)
     up = 0 < code < 400
+
     async with AsyncSessionLocal() as session:
         m = await session.get(Monitor, monitor_id)
-        if m:
-            if m.is_up is None or m.is_up != up:
-                m.is_up = up
-                m.last_state_change_ts = int(time.time())
-                session.add(StateEvent(monitor_id=monitor_id, is_up=up, changed_at_ts=m.last_state_change_ts))
-                print(f"[CHECK {monitor_id}] State changed to {up}")
-            session.add(Check(monitor_id=monitor_id, status_code=code, response_time_ms=dur))
-            await session.commit()
+        if not m:
+            return
+
+        previous_state = m.is_up
+
+        # First ever check → set state but DO NOT notify
+        if previous_state is None:
+            m.is_up = up
+            m.last_state_change_ts = int(time.time())
+            session.add(StateEvent(
+                monitor_id=monitor_id,
+                is_up=up,
+                changed_at_ts=m.last_state_change_ts
+            ))
+
+        # Real transition (UP→DOWN or DOWN→UP)
+        elif previous_state != up:
+            m.is_up = up
+            m.last_state_change_ts = int(time.time())
+            session.add(StateEvent(
+                monitor_id=monitor_id,
+                is_up=up,
+                changed_at_ts=m.last_state_change_ts
+            ))
+
+            if not up:
+                await send_slack_message(f"🚨 {url} is DOWN")
+            else:
+                await send_slack_message(f"✅ {url} is BACK UP")
+
+            print(f"[CHECK {monitor_id}] State changed to {up}")
+
+        session.add(Check(
+            monitor_id=monitor_id,
+            status_code=code,
+            response_time_ms=dur
+        ))
+
+        await session.commit()
