@@ -1,0 +1,18 @@
+# Virtual environment
+venv/
+.env/
+.envrc/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# SQLite database
+*.db
+*.sqlite3
+uptime.db
+
+
+# OS files
+.DS_Store
+
