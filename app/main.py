@@ -137,6 +137,13 @@ async def dashboard():
             .down { color: #ef4444; font-weight: bold; }
             .pending { color: #9ca3af; font-weight: bold; font-style: italic; }
             a { color: #4f46e5; text-decoration: none; font-weight: 500; }
+            .code-version {
+                max-width: 450px;
+                max-height: 80px;
+                overflow-y: auto;
+                white-space: pre-line;
+                font-size: 0.85em;
+            }
         </style>
     </head>
     <body>
@@ -503,10 +510,10 @@ async def run_check(monitor_id: int, url: str):
                             build_dt, biolink, dataset_version = parse_build_metadata(desc)
 
                             rows.append(
-                                f"{name} → "
-                                f"{dataset_version or 'unknown'} | "
-                                f"{biolink or 'unknown'} | "
-                                f"{build_dt or 'unknown'}"
+                                f"name: {name}\n "
+                                f"version: {dataset_version or 'unknown'}\n "
+                                f"biolink: {biolink or 'unknown'}\n "
+                                f"build date: {build_dt or 'unknown'}"
                             )
 
                         m.code_version = "\n".join(rows)
@@ -548,10 +555,10 @@ async def run_check(monitor_id: int, url: str):
                         build_dt, biolink, dataset_version = parse_build_metadata(desc)
 
                         rows.append(
-                            f"{name} → "
-                            f"{dataset_version or 'unknown'} | "
-                            f"{biolink or 'unknown'} | "
-                            f"{build_dt or 'unknown'}"
+                            f"name: {name}\n "
+                            f"version: {dataset_version or 'unknown'}\n "
+                            f"biolink: {biolink or 'unknown'}\n "
+                            f"build date: {build_dt or 'unknown'}"
                         )
 
                     m.code_version = "\n".join(rows)
