@@ -39,7 +39,7 @@ def parse_build_metadata(description: str):
     # Build datetime
     m = re.search(r"done on ([0-9\-:\. ]+)", description)
     if m:
-        build_dt = m.group(1)
+        build_dt = m.group(1)[:10]
 
     # Biolink version
     m = re.search(r"Biolink version used was ([0-9\.]+)", description)
@@ -141,7 +141,7 @@ async def dashboard():
                 max-width: 450px;
                 max-height: 120px;
                 overflow-y: auto;
-                white-space: pre-line;
+                white-space: pre-wrap;
                 font-size: 0.85em;
                 padding: 8px;
                 border: 1px solid #ddd;
