@@ -139,10 +139,24 @@ async def dashboard():
             a { color: #4f46e5; text-decoration: none; font-weight: 500; }
             .code-version {
                 max-width: 450px;
-                max-height: 80px;
+                max-height: 120px;
                 overflow-y: auto;
                 white-space: pre-line;
                 font-size: 0.85em;
+                padding: 8px;
+                border: 1px solid #ddd;
+                background: #fafafa;
+                position: relative;
+            }
+
+            /* subtle fade at bottom to indicate more content */
+            .code-version::after {
+                content: "";
+                position: sticky;
+                bottom: 0;
+                display: block;
+                height: 20px;
+                background: linear-gradient(to bottom, rgba(250,250,250,0), rgba(250,250,250,1));
             }
         </style>
     </head>
@@ -516,7 +530,7 @@ async def run_check(monitor_id: int, url: str):
                                 f"build date: {build_dt or 'unknown'}"
                             )
 
-                        m.code_version = "\n".join(rows)
+                        m.code_version = "\n\n".join(rows)
                 except Exception:
                     pass
 
