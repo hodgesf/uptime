@@ -850,6 +850,82 @@ async def status():
             })
         return result
 
+@app.get("/api/monitor/{monitor_id}")
+async def api_monitor_detail(monitor_id: int):
+    pacific = ZoneInfo("America/Los_Angeles")
+    now_ts = int(time.time())
+    one_day_ago_dt = datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
+    one_day_ago_ts = int(one_day_ago_dt.timestamp())
+
+    async with AsyncSessionLocal() as session:
+        monitor = await session.get(Monitor, monitor_id)
+        if not monitor: 
+            raise HTTPException(status_code=404, detail="Monitor not found")
+        
+        checks = (await session.execute(
+            select(Check)
+            .where(Check.monitor_id == monitor_id, Check.checked_at >= one_day_ago_dt)
+            .order_by(Check.checked_at.desc())
+        )).scalars().all()
+        
+        events = (await session.execute(
+            select(StateEvent)
+            .where(StateEvent.monitor_id == monitor_id, StateEvent.changed_at_ts >= one_day_ago_ts)
+            .order_by(StateEvent.changed_at_ts.desc())
+        )).scalars().all()
+
+    # Calculate stats
+    if monitor.last_state_change_ts is not None:
+        time_in_status_sec = now_ts - monitor.last_state_change_ts
+        time_in_status_str = format_duration_str(time_in_status_sec)
+        
+        chart_data = [c.response_time_ms for c in checks]
+        avg_lat = round(sum(chart_data) / len(chart_data), 2) if chart_data else 0
+        
+        up_checks = [c for c in checks if 0 < c.status_code < 400]
+        uptime_pct = round((len(up_checks) / len(checks)) * 100, 2) if checks else 0
+        
+        change_str = datetime.fromtimestamp(monitor.last_state_change_ts, tz=pacific).strftime("%m/%d %I:%M %p")
+    else:
+        time_in_status_str = "Pending"
+        avg_lat = 0
+        uptime_pct = 0
+        change_str = "Pending"
+
+    # Recent checks (last 10)
+    recent_checks = []
+    for c in list(reversed(checks))[:10]:
+        dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
+        recent_checks.append({
+            "timestamp": dt.astimezone(pacific).isoformat(),
+            "status_code": c.status_code,
+            "response_time_ms": c.response_time_ms
+        })
+
+    # Recent events (last 5)
+    recent_events = []
+    for e in events[:5]:
+        event_dt = datetime.fromtimestamp(e.changed_at_ts, tz=pacific)
+        recent_events.append({
+            "timestamp": event_dt.isoformat(),
+            "is_up": e.is_up,
+            "status": "UP" if e.is_up else "DOWN"
+        })
+
+    return {
+        "id": monitor.id,
+        "url": monitor.url,
+        "is_up": monitor.is_up,
+        "last_state_change_ts": monitor.last_state_change_ts or 0,
+        "last_state_change_str": change_str,
+        "code_version": monitor.code_version,
+        "avg_latency_ms": avg_lat,
+        "uptime_24h_percent": uptime_pct,
+        "time_in_current_status": time_in_status_str,
+        "recent_checks": recent_checks,
+        "recent_events": recent_events
+    }
+
 async def checker_loop():
     while True:
         try:
