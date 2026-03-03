@@ -593,16 +593,22 @@ async def monitor_detail(monitor_id: int):
                             # Naive datetime - assume UTC and convert
                             check_ts = int(c.checked_at.replace(tzinfo=ZoneInfo("UTC")).timestamp())
                         
-                        # Track checks for before/after comparison (code version detection)
-                        if check_ts < down_start_ts:
-                            before_down_checks.append(c)
-                        elif check_ts >= recovery_ts:
-                            after_recovery_checks.append(c)
+                        print(f"[DEBUG] Check: ts={check_ts}, down_start={down_start_ts}, recovery={recovery_ts}")
                         
-                        # Determine UP/DOWN status based on status code
-                        is_up = 0 < c.status_code < 400
-                        status_label = "UP" if is_up else "DOWN"
-                        status_color = "var(--up-color)" if is_up else "var(--down-color)"
+                        # Determine status: before down, during down, or after recovery
+                        if check_ts < down_start_ts:
+                            status_label = "Before Down"
+                            before_down_checks.append(c)
+                            print(f"  -> Before Down")
+                        elif check_ts >= recovery_ts:
+                            status_label = "After Recovery"
+                            after_recovery_checks.append(c)
+                            print(f"  -> After Recovery")
+                        else:
+                            status_label = "During Down"
+                            print(f"  -> During Down")
+                        
+                        status_color = "var(--down-color)" if status_label == "During Down" else "var(--text-secondary)"
                         code_color = "var(--down-color)" if c.status_code == 0 or c.status_code >= 400 else "var(--up-color)"
                         
                         # Display error message if status code is 0, otherwise show the code
@@ -636,19 +642,9 @@ async def monitor_detail(monitor_id: int):
                     code_version_changed = False
                     change_note = ""
                     if before_down_checks and after_recovery_checks:
-                        # Get the last check before down and first SUCCESSFUL check after recovery
+                        # Get the last check before down and first check after recovery
                         last_before = before_down_checks[-1]
-                        
-                        # Find first successful check after recovery (status code between 0-399)
-                        first_after = None
-                        for check in after_recovery_checks:
-                            if 0 < check.status_code < 400:
-                                first_after = check
-                                break
-                        
-                        if first_after is None:
-                            # If no successful check found, just use the first one
-                            first_after = after_recovery_checks[0]
+                        first_after = after_recovery_checks[0]
                         
                         # Extract build dates from both
                         def extract_build_date(check):
@@ -672,9 +668,19 @@ async def monitor_detail(monitor_id: int):
                         before_date = extract_build_date(last_before)
                         after_date = extract_build_date(first_after)
                         
+                        # Debug logging
+                        print(f"[DEBUG] Downtime event detected:")
+                        print(f"  before_down_checks: {len(before_down_checks)} checks")
+                        print(f"  after_recovery_checks: {len(after_recovery_checks)} checks")
+                        print(f"  last_before.code_version: {last_before.code_version[:50] if last_before.code_version else 'None'}...")
+                        print(f"  first_after.code_version: {first_after.code_version[:50] if first_after.code_version else 'None'}...")
+                        print(f"  before_date: {before_date}")
+                        print(f"  after_date: {after_date}")
+                        
                         if before_date and after_date and before_date != after_date:
                             code_version_changed = True
                             change_note = f' <span style="color: var(--link-color); font-weight: 500;">⚠️ Code version changed: {before_date} → {after_date}</span>'
+                            print(f"  ✅ CODE VERSION CHANGE DETECTED: {before_date} → {after_date}")
                     
                     downtime_sections.append(f'''
                     <details style="margin-bottom: 15px; border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; background: var(--card-bg);">
@@ -1076,9 +1082,13 @@ async def checker_loop():
         try:
             async with AsyncSessionLocal() as session:
                 monitors = (await session.execute(select(Monitor))).scalars().all()
+                print(f"[CHECKER] Running checks for {len(monitors)} monitors...")
                 await asyncio.gather(*[run_check(m.id, m.url) for m in monitors])
-        except Exception:
-            pass
+                print(f"[CHECKER] Checks completed")
+        except Exception as e: 
+            print(f"[CHECKER ERROR] {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
         await asyncio.sleep(CHECK_INTERVAL)
 
 FAIL_THRESHOLD = 2  # require N consecutive failures before marking DOWN
@@ -1126,6 +1136,55 @@ async def run_check(monitor_id: int, url: str):
         confirmed_up = is_success
         confirmed_down = (not is_success) and consecutive_failures >= FAIL_THRESHOLD
 
+        # Fetch code version on every successful check
+        if confirmed_up:
+            try:
+                cv = await http_client.get(f"{url}/code_version", timeout=5.0)
+                if cv.status_code == 200:
+                    data = cv.json()
+                    build_nodes = data.get("endpoint_build_nodes", {})
+
+                    rows = []
+
+                    for name, node in build_nodes.items():
+                        desc = node.get("description", "")
+                        
+                        # Get code_version from response key (for kg2c) or from description (for multiomics)
+                        code_ver = node.get("code_version")
+                        if not code_ver:
+                            # For multiomics, extract from description
+                            m_code = re.search(r"_v([\d\.]+)\.tsv", desc)
+                            if m_code:
+                                code_ver = m_code.group(1)
+                            # For kg2c, extract from description
+                            m_code = re.search(r"kg2c-([\d\.]+-v[\d\.]+)", desc)
+                            if m_code:
+                                code_ver = m_code.group(1)
+                        
+                        # Get biolink_version from response key first, then from description
+                        biolink = node.get("biolink_version")
+                        if not biolink:
+                            m_biolink = re.search(r"Biolink version used was ([0-9\.]+)", desc)
+                            if m_biolink:
+                                biolink = m_biolink.group(1)
+                        
+                        # Extract build date from description for all types
+                        build_dt = None
+                        m_date = re.search(r"done on ([0-9\-:\. ]+)", desc)
+                        if m_date:
+                            build_dt = m_date.group(1)[:10]
+
+                        rows.append(
+                            f"<strong>name:</strong> {name}\n"
+                            f"version: {code_ver or 'unknown'}\n"
+                            f"biolink: {biolink or 'unknown'}\n"
+                            f"build date: {build_dt or 'unknown'}"
+                        )
+
+                    m.code_version = "\n\n".join(rows)
+            except Exception:
+                pass
+
         # first check
         if previous_state is None:
             m.is_up = confirmed_up
@@ -1135,32 +1194,6 @@ async def run_check(monitor_id: int, url: str):
                 is_up=confirmed_up,
                 changed_at_ts=m.last_state_change_ts
             ))
-
-            # fetch code version on first successful initialization
-            if confirmed_up:
-                try:
-                    cv = await http_client.get(f"{url}/code_version", timeout=5.0)
-                    if cv.status_code == 200:
-                        data = cv.json()
-                        build_nodes = data.get("endpoint_build_nodes", {})
-
-                        rows = []
-
-                        for name, node in build_nodes.items():
-                            desc = node.get("description", "")
-
-                            build_dt, biolink, dataset_version = parse_build_metadata(desc)
-
-                            rows.append(
-                                f"<strong>name:</strong> {name}\n"
-                                f"version: {dataset_version or 'unknown'}\n"
-                                f"biolink: {biolink or 'unknown'}\n"
-                                f"build date: {build_dt[:10] or 'unknown'}"
-                            )
-
-                        m.code_version = "\n\n".join(rows)
-                except Exception:
-                    pass
 
         # transition to DOWN (only after threshold)
         elif previous_state and confirmed_down:
@@ -1182,31 +1215,6 @@ async def run_check(monitor_id: int, url: str):
                 is_up=True,
                 changed_at_ts=m.last_state_change_ts
             ))
-
-            # fetch code version once on recovery
-            try:
-                cv = await http_client.get(f"{url}/code_version", timeout=5.0)
-                if cv.status_code == 200:
-                    data = cv.json()
-                    build_nodes = data.get("endpoint_build_nodes", {})
-
-                    rows = []
-
-                    for name, node in build_nodes.items():
-                        desc = node.get("description", "")
-                        build_dt, biolink, dataset_version = parse_build_metadata(desc)
-
-                        rows.append(
-                            f"<strong>name:</strong> {name}\n"
-                            f"version: {dataset_version or 'unknown'}\n"
-                            f"biolink: {biolink or 'unknown'}\n"
-                            f"build date: {build_dt[:10] or 'unknown'}"
-                        )
-
-                    m.code_version = "\n\n".join(rows)
-            except Exception:
-                pass
-
             await send_slack_message(f"{url} is BACK UP")
 
         session.add(Check(
