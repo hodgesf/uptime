@@ -594,7 +594,10 @@ async def monitor_detail(monitor_id: int):
                         status_color = "var(--down-color)" if status_label == "During Down" else "var(--text-secondary)"
                         code_color = "var(--down-color)" if c.status_code == 0 or c.status_code >= 400 else "var(--up-color)"
                         
-                        downtime_html += f'<tr><td style="padding:8px; border-bottom:1px solid var(--border-color);">{check_time}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{code_color}; font-weight:bold;">{c.status_code or "TIMEOUT"}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{status_color}; font-weight:500;">{status_label}</td></tr>'
+                        # Display error message if status code is 0, otherwise show the code
+                        error_display = c.error_message if c.status_code == 0 and c.error_message else str(c.status_code)
+                        
+                        downtime_html += f'<tr><td style="padding:8px; border-bottom:1px solid var(--border-color);">{check_time}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{code_color}; font-weight:bold;">{error_display}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{status_color}; font-weight:500;">{status_label}</td></tr>'
                     
                     downtime_html += '</tbody></table>'
                     
