@@ -29,6 +29,7 @@ class Check(Base):
     response_time_ms = Column(Integer)
     checked_at = Column(DateTime(timezone=True), server_default=func.now())
     error_message = Column(String, nullable=True)
+    code_version = Column(String, nullable=True)
 
     monitor = relationship("Monitor", back_populates="checks")
 

@@ -576,39 +576,53 @@ async def monitor_detail(monitor_id: int):
                 downtime_checks = [c for c in checks if c.checked_at >= datetime.fromtimestamp(down_start_ts - 300, tz=ZoneInfo("UTC")).replace(tzinfo=None) and c.checked_at <= datetime.fromtimestamp(recovery_ts + 300, tz=ZoneInfo("UTC")).replace(tzinfo=None)]
                 
                 if downtime_checks:
-                    # Extract build date from code_version for display
-                    code_version_text = monitor.code_version or "—"
-                    build_date = "Unknown"
-                    date_match = code_version_text.match(r"done on\s+(\d{4}-\d{2}-\d{2})") if hasattr(code_version_text, 'match') else None
-                    if not date_match:
-                        date_match = re.search(r"done on\s+(\d{4}-\d{2}-\d{2})", code_version_text)
-                    if date_match:
-                        build_date = date_match.group(1)
-                    else:
-                        any_date_match = re.search(r"(\d{4}-\d{2}-\d{2})", code_version_text)
-                        if any_date_match:
-                            build_date = any_date_match.group(1)
-                    
                     downtime_html = '<table style="width:100%; border-collapse: collapse;"><thead><tr><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Time (PT)</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Status Code</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Status</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Code Version</th></tr></thead><tbody>'
+                    
+                    # Track code versions before and after for change detection
+                    before_down_checks = []
+                    after_recovery_checks = []
                     
                     for c in downtime_checks:
                         dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
                         check_time = dt.astimezone(pacific).strftime('%m/%d %I:%M:%S %p %Z')
-                        check_ts = int(c.checked_at.timestamp()) if hasattr(c.checked_at, 'timestamp') else int(c.checked_at.replace(tzinfo=ZoneInfo("UTC")).timestamp())
                         
-                        # Determine status: before down, during down, or after recovery
-                        if check_ts < down_start_ts:
-                            status_label = "Before Down"
-                        elif check_ts >= recovery_ts:
-                            status_label = "After Recovery"
+                        # Get timestamp consistently - convert to UTC datetime if needed, then get timestamp
+                        if c.checked_at.tzinfo:
+                            check_ts = int(c.checked_at.timestamp())
                         else:
-                            status_label = "During Down"
+                            # Naive datetime - assume UTC and convert
+                            check_ts = int(c.checked_at.replace(tzinfo=ZoneInfo("UTC")).timestamp())
                         
-                        status_color = "var(--down-color)" if status_label == "During Down" else "var(--text-secondary)"
+                        # Track checks for before/after comparison (code version detection)
+                        if check_ts < down_start_ts:
+                            before_down_checks.append(c)
+                        elif check_ts >= recovery_ts:
+                            after_recovery_checks.append(c)
+                        
+                        # Determine UP/DOWN status based on status code
+                        is_up = 0 < c.status_code < 400
+                        status_label = "UP" if is_up else "DOWN"
+                        status_color = "var(--up-color)" if is_up else "var(--down-color)"
                         code_color = "var(--down-color)" if c.status_code == 0 or c.status_code >= 400 else "var(--up-color)"
                         
                         # Display error message if status code is 0, otherwise show the code
                         error_display = c.error_message if c.status_code == 0 and c.error_message else str(c.status_code)
+                        
+                        # Extract build date from check's code_version
+                        build_date = "Unknown"
+                        if c.code_version:
+                            # Try multiple patterns for extraction
+                            date_match = re.search(r"done on\s+(\d{4}-\d{2}-\d{2})", c.code_version)
+                            if date_match:
+                                build_date = date_match.group(1)
+                            else:
+                                date_match = re.search(r"build date:\s*(\d{4}-\d{2}-\d{2})", c.code_version)
+                                if date_match:
+                                    build_date = date_match.group(1)
+                                else:
+                                    any_date_match = re.search(r"(\d{4}-\d{2}-\d{2})", c.code_version)
+                                    if any_date_match:
+                                        build_date = any_date_match.group(1)
                         
                         downtime_html += f'<tr><td style="padding:8px; border-bottom:1px solid var(--border-color);">{check_time}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{code_color}; font-weight:bold;">{error_display}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{status_color}; font-weight:500;">{status_label}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); font-size:0.9em; color:var(--text-secondary);">{build_date}</td></tr>'
                     
@@ -618,9 +632,53 @@ async def monitor_detail(monitor_id: int):
                     recovery_str = datetime.fromtimestamp(recovery_ts, tz=pacific).strftime('%m/%d %I:%M %p %Z')
                     downtime_duration = format_duration_str(recovery_ts - down_start_ts)
                     
+                    # Check if code version changed between before and after recovery
+                    code_version_changed = False
+                    change_note = ""
+                    if before_down_checks and after_recovery_checks:
+                        # Get the last check before down and first SUCCESSFUL check after recovery
+                        last_before = before_down_checks[-1]
+                        
+                        # Find first successful check after recovery (status code between 0-399)
+                        first_after = None
+                        for check in after_recovery_checks:
+                            if 0 < check.status_code < 400:
+                                first_after = check
+                                break
+                        
+                        if first_after is None:
+                            # If no successful check found, just use the first one
+                            first_after = after_recovery_checks[0]
+                        
+                        # Extract build dates from both
+                        def extract_build_date(check):
+                            if not check.code_version:
+                                return None
+                            # Try multiple patterns
+                            # Pattern 1: "done on YYYY-MM-DD"
+                            date_match = re.search(r"done on\s+(\d{4}-\d{2}-\d{2})", check.code_version)
+                            if date_match:
+                                return date_match.group(1)
+                            # Pattern 2: "build date: YYYY-MM-DD"
+                            date_match = re.search(r"build date:\s*(\d{4}-\d{2}-\d{2})", check.code_version)
+                            if date_match:
+                                return date_match.group(1)
+                            # Pattern 3: Any YYYY-MM-DD pattern
+                            any_date_match = re.search(r"(\d{4}-\d{2}-\d{2})", check.code_version)
+                            if any_date_match:
+                                return any_date_match.group(1)
+                            return None
+                        
+                        before_date = extract_build_date(last_before)
+                        after_date = extract_build_date(first_after)
+                        
+                        if before_date and after_date and before_date != after_date:
+                            code_version_changed = True
+                            change_note = f' <span style="color: var(--link-color); font-weight: 500;">⚠️ Code version changed: {before_date} → {after_date}</span>'
+                    
                     downtime_sections.append(f'''
                     <details style="margin-bottom: 15px; border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; background: var(--card-bg);">
-                        <summary style="font-weight: 600; cursor: pointer; padding: 5px; color: var(--down-color);">Downtime Event - {down_start_str} ({downtime_duration})</summary>
+                        <summary style="font-weight: 600; cursor: pointer; padding: 5px; color: var(--down-color);">Downtime Event - {down_start_str} ({downtime_duration}){change_note}</summary>
                         <div style="padding:15px; margin-top:10px;">
                             {downtime_html}
                         </div>
@@ -1018,13 +1076,9 @@ async def checker_loop():
         try:
             async with AsyncSessionLocal() as session:
                 monitors = (await session.execute(select(Monitor))).scalars().all()
-                print(f"[CHECKER] Running checks for {len(monitors)} monitors...")
                 await asyncio.gather(*[run_check(m.id, m.url) for m in monitors])
-                print(f"[CHECKER] Checks completed")
-        except Exception as e: 
-            print(f"[CHECKER ERROR] {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            pass
         await asyncio.sleep(CHECK_INTERVAL)
 
 FAIL_THRESHOLD = 2  # require N consecutive failures before marking DOWN
@@ -1159,7 +1213,8 @@ async def run_check(monitor_id: int, url: str):
             monitor_id=monitor_id,
             status_code=code,
             response_time_ms=dur,
-            error_message=error_message
+            error_message=error_message,
+            code_version=m.code_version
         ))
 
         await session.commit()
