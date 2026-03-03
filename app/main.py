@@ -129,68 +129,194 @@ async def dashboard():
     <head>
         <title>Endpoint Monitor</title>
         <style>
-            body { font-family: sans-serif; margin: 40px; background: #f4f4f9; color: #333; }
-            table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-            th, td { padding: 15px; text-align: left; border-bottom: 1px solid #eee; }
-            th { background-color: #6366f1; color: white; }
-            tr:hover { background-color: #f9fafb; }
-            .up { color: #10b981; font-weight: bold; }
-            .down { color: #ef4444; font-weight: bold; }
-            .pending { color: #9ca3af; font-weight: bold; font-style: italic; }
-            a { color: #4f46e5; text-decoration: none; font-weight: 500; }
+            :root {
+                --bg-primary: #ffffff;
+                --bg-secondary: #f8f9fa;
+                --text-primary: #1a1a1a;
+                --text-secondary: #666666;
+                --border-color: #e0e0e0;
+                --header-bg: #2c3e50;
+                --header-text: #ffffff;
+                --table-hover: #f5f5f5;
+                --up-color: #22c55e;
+                --down-color: #ef4444;
+                --pending-color: #9ca3af;
+                --link-color: #0066cc;
+                --code-bg: #f5f5f5;
+                --code-border: #d0d0d0;
+            }
+            
+            [data-theme="dark"] {
+                --bg-primary: #1e1e1e;
+                --bg-secondary: #2d2d2d;
+                --text-primary: #ffffff;
+                --text-secondary: #b0b0b0;
+                --border-color: #404040;
+                --header-bg: #1a2332;
+                --header-text: #ffffff;
+                --table-hover: #2d2d2d;
+                --up-color: #22c55e;
+                --down-color: #ff5252;
+                --pending-color: #9ca3af;
+                --link-color: #4da6ff;
+                --code-bg: #2d2d2d;
+                --code-border: #404040;
+            }
+            
+            body { 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                margin: 0;
+                padding: 20px 40px;
+                background: var(--bg-primary);
+                color: var(--text-primary);
+            }
+            
+            .header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 30px;
+            }
+            
+            h2 { 
+                margin: 0;
+                font-size: 28px;
+                font-weight: 600;
+            }
+            
+            .theme-toggle {
+                background: var(--header-bg);
+                color: var(--header-text);
+                border: none;
+                padding: 8px 16px;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 14px;
+                font-weight: 500;
+                transition: opacity 0.2s;
+            }
+            
+            .theme-toggle:hover {
+                opacity: 0.8;
+            }
+            
+            table { 
+                width: 100%; 
+                border-collapse: collapse; 
+                background: var(--bg-primary); 
+                border-radius: 8px; 
+                overflow: hidden; 
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1); 
+            }
+            
+            th, td { 
+                padding: 16px; 
+                text-align: left; 
+                border-bottom: 1px solid var(--border-color); 
+            }
+            
+            th { 
+                background-color: var(--header-bg); 
+                color: var(--header-text);
+                font-weight: 600;
+                font-size: 13px;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+            
+            tr:hover { 
+                background-color: var(--table-hover); 
+            }
+            
+            .up { 
+                color: var(--up-color); 
+                font-weight: 700;
+                font-size: 14px;
+            }
+            
+            .down { 
+                color: var(--down-color); 
+                font-weight: 700;
+                font-size: 14px;
+            }
+            
+            .pending { 
+                color: var(--pending-color); 
+                font-weight: 600; 
+                font-style: italic; 
+                font-size: 14px;
+            }
+            
+            a { 
+                color: var(--link-color); 
+                text-decoration: none; 
+                font-weight: 500; 
+            }
+            
+            a:hover { 
+                text-decoration: underline;
+            }
+            
             .endpoint-link {
-                color: #4f46e5;
+                color: var(--link-color);
                 font-size: 0.9em;
                 font-weight: 500;
             }
-            .endpoint-link:hover {
-                text-decoration: underline;
-            }
+            
             .code-version-container {
-                cursor: pointer;
-                user-select: none;
+                display: flex;
+                flex-direction: column;
             }
+            
             .code-version-summary {
                 font-weight: 500;
-                color: #4f46e5;
-                padding: 4px 8px;
-                border-radius: 4px;
+                color: var(--text-primary);
+                font-size: 14px;
+            }
+            
+            .code-version-link {
+                color: var(--link-color);
+                font-size: 0.8em;
+                text-decoration: none;
+                cursor: pointer;
+                margin-top: 4px;
                 display: inline-block;
-                background: #f0f4ff;
-                border: 1px solid #ddd;
+                font-weight: 500;
             }
-            .code-version-summary:hover {
-                background: #e8eeff;
+            
+            .code-version-link:hover {
+                text-decoration: underline;
             }
+            
             .code-version-details {
-                display: none;
                 max-width: 450px;
+                max-height: 0;
+                overflow: hidden;
+                white-space: pre-wrap;
+                font-size: 13px;
+                padding: 0px 8px;
+                border: none;
+                background: var(--code-bg);
+                margin-top: 0px;
+                border-radius: 4px;
+                transition: max-height 0.3s ease, padding 0.3s ease, border 0.3s ease, margin-top 0.3s ease;
+                color: var(--text-primary);
+            }
+            
+            .code-version-details.expanded {
                 max-height: 120px;
                 overflow-y: auto;
-                white-space: pre-wrap;
-                font-size: 0.85em;
                 padding: 8px;
-                border: 1px solid #ddd;
-                background: #fafafa;
+                border: 1px solid var(--code-border);
                 margin-top: 8px;
-                border-radius: 4px;
-            }
-            .code-version-details.expanded {
-                display: block;
-            }
-            .code-version-toggle::before {
-                content: '▶ ';
-                margin-right: 4px;
-                display: inline-block;
-                transition: transform 0.2s;
-            }
-            .code-version-toggle.expanded::before {
-                transform: rotate(90deg);
             }
         </style>
     </head>
     <body>
-        <h2>System Status</h2>
+        <div class="header">
+            <h2>System Status</h2>
+            <button class="theme-toggle" onclick="toggleTheme()">🌙 Dark Mode</button>
+        </div>
         <table>
             <thead>
                 <tr>
@@ -222,7 +348,8 @@ async def dashboard():
                                 <td class="state-time"></td>
                                 <td>
                                     <div class="code-version-container">
-                                        <div class="code-version-summary code-version-toggle"></div>
+                                        <div class="code-version-summary"></div>
+                                        <a class="code-version-link">show more</a>
                                         <div class="code-version-details"></div>
                                     </div>
                                 </td>
@@ -235,7 +362,7 @@ async def dashboard():
                                 timeCell: row.querySelector(".state-time"),
                                 codeSummary: row.querySelector(".code-version-summary"),
                                 codeDetails: row.querySelector(".code-version-details"),
-                                codeToggle: row.querySelector(".code-version-toggle"),
+                                codeLink: row.querySelector(".code-version-link"),
                                 codeContainer: row.querySelector(".code-version-container"),
                                 ts: m.last_state_change_ts
                             };
@@ -271,12 +398,13 @@ async def dashboard():
                         ref.codeDetails.innerHTML = codeVersionText;
                         
                         // Add click handler for toggle (only once)
-                        if (!ref.codeContainer.hasClickHandler) {
-                            ref.codeContainer.addEventListener('click', () => {
-                                ref.codeToggle.classList.toggle('expanded');
+                        if (!ref.codeLink.hasClickHandler) {
+                            ref.codeLink.addEventListener('click', (e) => {
+                                e.preventDefault();
                                 ref.codeDetails.classList.toggle('expanded');
+                                ref.codeLink.textContent = ref.codeDetails.classList.contains('expanded') ? 'show less' : 'show more';
                             });
-                            ref.codeContainer.hasClickHandler = true;
+                            ref.codeLink.hasClickHandler = true;
                         }
                     });
                 } catch (e) { console.error(e); }
@@ -300,6 +428,27 @@ async def dashboard():
             loadStatus();
             setInterval(loadStatus, 5000);
             setInterval(updateTimers, 1000);
+            
+            // Dark mode toggle
+            function toggleTheme() {
+                const html = document.documentElement;
+                const isDark = html.getAttribute('data-theme') === 'dark';
+                const newTheme = isDark ? 'light' : 'dark';
+                html.setAttribute('data-theme', newTheme);
+                localStorage.setItem('theme', newTheme);
+                updateThemeButton();
+            }
+            
+            function updateThemeButton() {
+                const button = document.querySelector('.theme-toggle');
+                const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+                button.textContent = isDark ? '☀️ Light Mode' : '🌙 Dark Mode';
+            }
+            
+            // Initialize theme from localStorage or prefer dark mode
+            const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            updateThemeButton();
             
         </script>
     </body>
@@ -401,23 +550,200 @@ async def monitor_detail(monitor_id: int):
         <title>{monitor.url}</title>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <style>
-            body {{ font-family: sans-serif; margin: 40px; background: #f4f4f9; }}
-            .container {{ max-width: 1000px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
-            .stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 25px; }}
-            .stat-card {{ background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #6366f1; }}
-            .stat-card h4 {{ margin: 0; font-size: 0.75em; color: #666; text-transform: uppercase; }}
-            .stat-card p {{ margin: 8px 0 0; font-size: 1.2em; font-weight: bold; }}
-            table {{ width: 100%; border-collapse: collapse; }}
-            th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #eee; }}
-            .up {{ color: #10b981; font-weight: bold; }} .down {{ color: #ef4444; font-weight: bold; }} .pending {{ color: #9ca3af; font-style: italic; }}
-            details {{ margin-bottom: 15px; border: 1px solid #eee; border-radius: 8px; padding: 10px; }}
-            summary {{ font-weight: bold; cursor: pointer; padding: 5px; }}
+            :root {{
+                --bg-primary: #ffffff;
+                --bg-secondary: #f8f9fa;
+                --text-primary: #1a1a1a;
+                --text-secondary: #666666;
+                --border-color: #e0e0e0;
+                --header-bg: #2c3e50;
+                --header-text: #ffffff;
+                --table-hover: #f5f5f5;
+                --up-color: #22c55e;
+                --down-color: #ef4444;
+                --pending-color: #9ca3af;
+                --link-color: #0066cc;
+                --code-bg: #f5f5f5;
+                --code-border: #d0d0d0;
+                --card-bg: #f8f9fa;
+                --card-border: #6366f1;
+            }}
+            
+            [data-theme="dark"] {{
+                --bg-primary: #1e1e1e;
+                --bg-secondary: #2d2d2d;
+                --text-primary: #ffffff;
+                --text-secondary: #b0b0b0;
+                --border-color: #404040;
+                --header-bg: #1a2332;
+                --header-text: #ffffff;
+                --table-hover: #2d2d2d;
+                --up-color: #22c55e;
+                --down-color: #ff5252;
+                --pending-color: #9ca3af;
+                --link-color: #4da6ff;
+                --code-bg: #2d2d2d;
+                --code-border: #404040;
+                --card-bg: #2d2d2d;
+                --card-border: #404040;
+            }}
+            
+            body {{ 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                margin: 0;
+                padding: 20px 40px;
+                background: var(--bg-primary);
+                color: var(--text-primary);
+            }}
+            
+            .header {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 30px;
+            }}
+            
+            h2 {{ 
+                margin: 0;
+                font-size: 28px;
+                font-weight: 600;
+            }}
+            
+            .theme-toggle {{
+                background: var(--header-bg);
+                color: var(--header-text);
+                border: none;
+                padding: 8px 16px;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 14px;
+                font-weight: 500;
+                transition: opacity 0.2s;
+            }}
+            
+            .theme-toggle:hover {{
+                opacity: 0.8;
+            }}
+            
+            .container {{ 
+                max-width: 1000px; 
+                margin: auto; 
+                background: var(--bg-primary); 
+                padding: 30px; 
+                border-radius: 12px; 
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1); 
+            }}
+            
+            .back-link {{
+                text-decoration: none;
+                color: var(--link-color);
+                font-weight: 500;
+            }}
+            
+            .back-link:hover {{
+                text-decoration: underline;
+            }}
+            
+            .stats-grid {{ 
+                display: grid; 
+                grid-template-columns: repeat(4, 1fr); 
+                gap: 15px; 
+                margin-bottom: 25px; 
+            }}
+            
+            .stat-card {{ 
+                background: var(--card-bg); 
+                padding: 15px; 
+                border-radius: 8px; 
+                border-left: 4px solid var(--card-border);
+            }}
+            
+            .stat-card h4 {{ 
+                margin: 0; 
+                font-size: 0.75em; 
+                color: var(--text-secondary); 
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                font-weight: 600;
+            }}
+            
+            .stat-card p {{ 
+                margin: 8px 0 0; 
+                font-size: 1.2em; 
+                font-weight: 600;
+                color: var(--text-primary);
+            }}
+            
+            table {{ 
+                width: 100%; 
+                border-collapse: collapse;
+                background: var(--bg-primary);
+            }}
+            
+            th, td {{ 
+                padding: 12px; 
+                text-align: left; 
+                border-bottom: 1px solid var(--border-color);
+            }}
+            
+            th {{
+                background-color: var(--header-bg);
+                color: var(--header-text);
+                font-weight: 600;
+                font-size: 13px;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }}
+            
+            tr:hover {{
+                background-color: var(--table-hover);
+            }}
+            
+            .up {{ 
+                color: var(--up-color); 
+                font-weight: 700;
+                font-size: 14px;
+            }}
+            
+            .down {{ 
+                color: var(--down-color); 
+                font-weight: 700;
+                font-size: 14px;
+            }}
+            
+            .pending {{ 
+                color: var(--pending-color); 
+                font-style: italic;
+                font-size: 14px;
+            }}
+            
+            details {{ 
+                margin-bottom: 15px; 
+                border: 1px solid var(--border-color); 
+                border-radius: 8px; 
+                padding: 10px;
+                background: var(--card-bg);
+            }}
+            
+            summary {{ 
+                font-weight: 600; 
+                cursor: pointer; 
+                padding: 5px;
+                color: var(--text-primary);
+            }}
+            
+            summary:hover {{
+                opacity: 0.8;
+            }}
         </style>
     </head>
     <body>
+        <div class="header">
+            <h2>{monitor.url}</h2>
+            <button class="theme-toggle" onclick="toggleTheme()">🌙 Dark Mode</button>
+        </div>
         <div class="container">
-            <a href="/" style="text-decoration:none; color:#6366f1;">← Back to Dashboard</a>
-            <h2 style="margin: 15px 0;">{monitor.url}</h2>
+            <a href="/" class="back-link">← Back to Dashboard</a>
             
             <div class="stats-grid">
                 <div class="stat-card"><h4>Current Status</h4><p class='{status_class}'>{status_label}</p></div>
@@ -450,6 +776,27 @@ async def monitor_detail(monitor_id: int):
             </details>
         </div>
         <script>
+            // Dark mode toggle
+            function toggleTheme() {{
+                const html = document.documentElement;
+                const isDark = html.getAttribute('data-theme') === 'dark';
+                const newTheme = isDark ? 'light' : 'dark';
+                html.setAttribute('data-theme', newTheme);
+                localStorage.setItem('theme', newTheme);
+                updateThemeButton();
+            }}
+            
+            function updateThemeButton() {{
+                const button = document.querySelector('.theme-toggle');
+                const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+                button.textContent = isDark ? '☀️ Light Mode' : '🌙 Dark Mode';
+            }}
+            
+            // Initialize theme from localStorage or prefer dark mode
+            const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            updateThemeButton();
+            
             const startTs = {monitor.last_state_change_ts or 0};
             function updateDetailTimer() {{
                 if (startTs === 0) return;  // Not initialized yet
