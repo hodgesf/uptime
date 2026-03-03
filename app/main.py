@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from .database import Base, engine, AsyncSessionLocal
 from .models import Monitor, Check, StateEvent
@@ -102,6 +103,15 @@ async def lifespan(app: FastAPI):
     await http_client.aclose()
 
 app = FastAPI(lifespan=lifespan)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
 
 def format_duration_str(seconds):
     if seconds < 0: seconds = 0
