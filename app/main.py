@@ -496,7 +496,7 @@ async def monitor_detail(monitor_id: int):
         for c in checks:
             # If datetime is naive, assume it's UTC; if it has tzinfo, use as-is
             dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
-            chart_labels.append(dt.astimezone(pacific).strftime('%I:%M %p'))
+            chart_labels.append(dt.astimezone(pacific).strftime('%I:%M %p %Z'))
         avg_lat = round(sum(chart_data) / len(chart_data), 2) if chart_data else 0
         up_checks = [c for c in checks if 0 < c.status_code < 400]
         uptime_pct = round((len(up_checks) / len(checks)) * 100, 2) if checks else 0
@@ -519,7 +519,7 @@ async def monitor_detail(monitor_id: int):
     
     # Only show current state if it actually exists (state change has occurred)
     if monitor.last_state_change_ts is not None and monitor.is_up is not None:
-        current_start_dt = datetime.fromtimestamp(monitor.last_state_change_ts, tz=pacific).strftime('%m/%d %I:%M:%S %p')
+        current_start_dt = datetime.fromtimestamp(monitor.last_state_change_ts, tz=pacific).strftime('%m/%d %I:%M:%S %p %Z')
         timeline_rows.append(f"""
             <tr>
                 <td class='{status_class}'>{status_label} (Current)</td>
@@ -537,7 +537,7 @@ async def monitor_detail(monitor_id: int):
             duration_sec = next_ts - e.changed_at_ts
             s_class = "up" if e.is_up else "down"
             label = "UP" if e.is_up else "DOWN"
-            start_time = datetime.fromtimestamp(e.changed_at_ts, tz=pacific).strftime('%m/%d %I:%M:%S %p')
+            start_time = datetime.fromtimestamp(e.changed_at_ts, tz=pacific).strftime('%m/%d %I:%M:%S %p %Z')
             
             timeline_rows.append(f"<tr><td class='{s_class}'>{label}</td><td>{start_time}</td><td>{format_duration_str(duration_sec)}</td></tr>")
             next_ts = e.changed_at_ts
@@ -551,7 +551,7 @@ async def monitor_detail(monitor_id: int):
         for c in reversed(checks):
             # If datetime is naive, assume it's UTC; if it has tzinfo, use as-is
             dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
-            raw_logs_list.append(f"<tr><td>{dt.astimezone(pacific).strftime('%m/%d %I:%M:%S %p')}</td><td>{c.status_code}</td></tr>")
+            raw_logs_list.append(f"<tr><td>{dt.astimezone(pacific).strftime('%m/%d %I:%M:%S %p %Z')}</td><td>{c.status_code}</td></tr>")
     raw_logs = "".join(raw_logs_list)
 
     # Build downtime analysis
@@ -576,11 +576,24 @@ async def monitor_detail(monitor_id: int):
                 downtime_checks = [c for c in checks if c.checked_at >= datetime.fromtimestamp(down_start_ts - 300, tz=ZoneInfo("UTC")).replace(tzinfo=None) and c.checked_at <= datetime.fromtimestamp(recovery_ts + 300, tz=ZoneInfo("UTC")).replace(tzinfo=None)]
                 
                 if downtime_checks:
-                    downtime_html = '<table style="width:100%; border-collapse: collapse;"><thead><tr><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Time (PT)</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Status Code</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Status</th></tr></thead><tbody>'
+                    # Extract build date from code_version for display
+                    code_version_text = monitor.code_version or "—"
+                    build_date = "Unknown"
+                    date_match = code_version_text.match(r"done on\s+(\d{4}-\d{2}-\d{2})") if hasattr(code_version_text, 'match') else None
+                    if not date_match:
+                        date_match = re.search(r"done on\s+(\d{4}-\d{2}-\d{2})", code_version_text)
+                    if date_match:
+                        build_date = date_match.group(1)
+                    else:
+                        any_date_match = re.search(r"(\d{4}-\d{2}-\d{2})", code_version_text)
+                        if any_date_match:
+                            build_date = any_date_match.group(1)
+                    
+                    downtime_html = '<table style="width:100%; border-collapse: collapse;"><thead><tr><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Time (PT)</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Status Code</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Status</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Code Version</th></tr></thead><tbody>'
                     
                     for c in downtime_checks:
                         dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
-                        check_time = dt.astimezone(pacific).strftime('%m/%d %I:%M:%S %p')
+                        check_time = dt.astimezone(pacific).strftime('%m/%d %I:%M:%S %p %Z')
                         check_ts = int(c.checked_at.timestamp()) if hasattr(c.checked_at, 'timestamp') else int(c.checked_at.replace(tzinfo=ZoneInfo("UTC")).timestamp())
                         
                         # Determine status: before down, during down, or after recovery
@@ -597,12 +610,12 @@ async def monitor_detail(monitor_id: int):
                         # Display error message if status code is 0, otherwise show the code
                         error_display = c.error_message if c.status_code == 0 and c.error_message else str(c.status_code)
                         
-                        downtime_html += f'<tr><td style="padding:8px; border-bottom:1px solid var(--border-color);">{check_time}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{code_color}; font-weight:bold;">{error_display}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{status_color}; font-weight:500;">{status_label}</td></tr>'
+                        downtime_html += f'<tr><td style="padding:8px; border-bottom:1px solid var(--border-color);">{check_time}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{code_color}; font-weight:bold;">{error_display}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{status_color}; font-weight:500;">{status_label}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); font-size:0.9em; color:var(--text-secondary);">{build_date}</td></tr>'
                     
                     downtime_html += '</tbody></table>'
                     
-                    down_start_str = datetime.fromtimestamp(down_start_ts, tz=pacific).strftime('%m/%d %I:%M %p')
-                    recovery_str = datetime.fromtimestamp(recovery_ts, tz=pacific).strftime('%m/%d %I:%M %p')
+                    down_start_str = datetime.fromtimestamp(down_start_ts, tz=pacific).strftime('%m/%d %I:%M %p %Z')
+                    recovery_str = datetime.fromtimestamp(recovery_ts, tz=pacific).strftime('%m/%d %I:%M %p %Z')
                     downtime_duration = format_duration_str(recovery_ts - down_start_ts)
                     
                     downtime_sections.append(f'''
@@ -911,7 +924,7 @@ async def status():
         result = []
         for m in monitors:
             if m.last_state_change_ts is not None:
-                change_str = datetime.fromtimestamp(m.last_state_change_ts, tz=pacific).strftime("%m/%d %I:%M %p")
+                change_str = datetime.fromtimestamp(m.last_state_change_ts, tz=pacific).strftime("%m/%d %I:%M %p %Z")
             else:
                 change_str = "Pending"
             result.append({
@@ -959,7 +972,7 @@ async def api_monitor_detail(monitor_id: int):
         up_checks = [c for c in checks if 0 < c.status_code < 400]
         uptime_pct = round((len(up_checks) / len(checks)) * 100, 2) if checks else 0
         
-        change_str = datetime.fromtimestamp(monitor.last_state_change_ts, tz=pacific).strftime("%m/%d %I:%M %p")
+        change_str = datetime.fromtimestamp(monitor.last_state_change_ts, tz=pacific).strftime("%m/%d %I:%M %p %Z")
     else:
         time_in_status_str = "Pending"
         avg_lat = 0
@@ -971,7 +984,7 @@ async def api_monitor_detail(monitor_id: int):
     for c in list(reversed(checks))[:10]:
         dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
         recent_checks.append({
-            "timestamp": dt.astimezone(pacific).isoformat(),
+            "timestamp": dt.astimezone(pacific).strftime('%m/%d %I:%M:%S %p %Z'),
             "status_code": c.status_code,
             "response_time_ms": c.response_time_ms
         })
@@ -981,7 +994,7 @@ async def api_monitor_detail(monitor_id: int):
     for e in events[:5]:
         event_dt = datetime.fromtimestamp(e.changed_at_ts, tz=pacific)
         recent_events.append({
-            "timestamp": event_dt.isoformat(),
+            "timestamp": event_dt.strftime('%m/%d %I:%M:%S %p %Z'),
             "is_up": e.is_up,
             "status": "UP" if e.is_up else "DOWN"
         })
