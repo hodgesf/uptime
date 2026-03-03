@@ -554,6 +554,65 @@ async def monitor_detail(monitor_id: int):
             raw_logs_list.append(f"<tr><td>{dt.astimezone(pacific).strftime('%m/%d %I:%M:%S %p')}</td><td>{c.status_code}</td></tr>")
     raw_logs = "".join(raw_logs_list)
 
+    # Build downtime analysis
+    downtime_sections = []
+    sorted_events = sorted(events, key=lambda e: e.changed_at_ts, reverse=True)
+    
+    for i, event in enumerate(sorted_events):
+        # Find DOWN events (events where is_up changed to False)
+        if not event.is_up:
+            # Find the recovery event (next event where is_up is True)
+            recovery_event = None
+            for j in range(i-1, -1, -1):
+                if sorted_events[j].is_up:
+                    recovery_event = sorted_events[j]
+                    break
+            
+            if recovery_event:
+                down_start_ts = event.changed_at_ts
+                recovery_ts = recovery_event.changed_at_ts
+                
+                # Get checks: 2 before down, during down, 2 after recovery
+                downtime_checks = [c for c in checks if c.checked_at >= datetime.fromtimestamp(down_start_ts - 300, tz=ZoneInfo("UTC")).replace(tzinfo=None) and c.checked_at <= datetime.fromtimestamp(recovery_ts + 300, tz=ZoneInfo("UTC")).replace(tzinfo=None)]
+                
+                if downtime_checks:
+                    downtime_html = '<table style="width:100%; border-collapse: collapse;"><thead><tr><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Time (PT)</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Status Code</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Status</th></tr></thead><tbody>'
+                    
+                    for c in downtime_checks:
+                        dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
+                        check_time = dt.astimezone(pacific).strftime('%m/%d %I:%M:%S %p')
+                        check_ts = int(c.checked_at.timestamp()) if hasattr(c.checked_at, 'timestamp') else int(c.checked_at.replace(tzinfo=ZoneInfo("UTC")).timestamp())
+                        
+                        # Determine status: before down, during down, or after recovery
+                        if check_ts < down_start_ts:
+                            status_label = "Before Down"
+                        elif check_ts >= recovery_ts:
+                            status_label = "After Recovery"
+                        else:
+                            status_label = "During Down"
+                        
+                        status_color = "var(--down-color)" if status_label == "During Down" else "var(--text-secondary)"
+                        code_color = "var(--down-color)" if c.status_code == 0 or c.status_code >= 400 else "var(--up-color)"
+                        
+                        downtime_html += f'<tr><td style="padding:8px; border-bottom:1px solid var(--border-color);">{check_time}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{code_color}; font-weight:bold;">{c.status_code or "TIMEOUT"}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{status_color}; font-weight:500;">{status_label}</td></tr>'
+                    
+                    downtime_html += '</tbody></table>'
+                    
+                    down_start_str = datetime.fromtimestamp(down_start_ts, tz=pacific).strftime('%m/%d %I:%M %p')
+                    recovery_str = datetime.fromtimestamp(recovery_ts, tz=pacific).strftime('%m/%d %I:%M %p')
+                    downtime_duration = format_duration_str(recovery_ts - down_start_ts)
+                    
+                    downtime_sections.append(f'''
+                    <details style="margin-bottom: 15px; border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; background: var(--card-bg);">
+                        <summary style="font-weight: 600; cursor: pointer; padding: 5px; color: var(--down-color);">Downtime Event - {down_start_str} ({downtime_duration})</summary>
+                        <div style="padding:15px; margin-top:10px;">
+                            {downtime_html}
+                        </div>
+                    </details>
+                    ''')
+    
+    downtime_section_html = "".join(downtime_sections) if downtime_sections else ""
+
     return f"""
     <html>
     <head>
@@ -769,6 +828,8 @@ async def monitor_detail(monitor_id: int):
                     <tbody>{"".join(timeline_rows)}</tbody>
                 </table>
             </details>
+
+            {downtime_section_html}
 
             <details>
                 <summary>Latency Graph & Metrics</summary>
