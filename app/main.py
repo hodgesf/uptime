@@ -428,9 +428,18 @@ async def dashboard():
                     } else {
                         const s = Math.max(0, now - ref.ts);
                         const h = Math.floor(s / 3600);
-                        const m = Math.floor((s % 3600) / 60);
-                        const sec = s % 60;
-                        ref.timeCell.textContent = `${h}h ${m}m ${sec}s`;
+                        
+                        if (h >= 24) {
+                            const d = Math.floor(h / 24);
+                            const remainingH = h % 24;
+                            const m = Math.floor((s % 3600) / 60);
+                            const sec = s % 60;
+                            ref.timeCell.textContent = `${d}d ${remainingH}h ${m}m ${sec}s`;
+                        } else {
+                            const m = Math.floor((s % 3600) / 60);
+                            const sec = s % 60;
+                            ref.timeCell.textContent = `${h}h ${m}m ${sec}s`;
+                        }
                     }
                 });
             }
