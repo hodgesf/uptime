@@ -18,8 +18,6 @@ CHECK_INTERVAL = 30
 ENDPOINTS = [
     "https://kg2cploverdb.ci.transltr.io",
     "https://kg2cploverdb.test.transltr.io",
-    "https://kg2cplover3.rtx.ai:9990",
-    "http://ploverdev.rtx.ai:9991",
     "https://multiomics.rtx.ai:9990",
     "https://multiomics.ci.transltr.io",
 ]
