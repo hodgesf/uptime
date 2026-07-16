@@ -20,6 +20,10 @@ ENDPOINTS = [
     "https://kg2cploverdb.test.transltr.io",
     "https://multiomics.rtx.ai:9990",
     "https://multiomics.ci.transltr.io",
+    "https://arax.ncats.io",
+    "https://arax.ncats.io/test",
+    "https://arax.ncats.io/beta",
+    "https://arax.ci.transltr.io",
 ]
 
 http_client = httpx.AsyncClient(timeout=10, verify=False)
@@ -505,7 +509,7 @@ async def monitor_detail(monitor_id: int):
             dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
             chart_labels.append(dt.astimezone(pacific).strftime('%I:%M %p %Z'))
         avg_lat = round(sum(chart_data) / len(chart_data), 2) if chart_data else 0
-        up_checks = [c for c in checks if 0 < c.status_code < 400]
+        up_checks = [c for c in checks if c.status_code == 200]
         uptime_pct = round((len(up_checks) / len(checks)) * 100, 2) if checks else 0
         time_in_status_sec = now_ts - monitor.last_state_change_ts
         time_in_status_str = format_duration_str(time_in_status_sec)
@@ -1040,7 +1044,7 @@ async def api_monitor_detail(monitor_id: int):
         chart_data = [c.response_time_ms for c in checks]
         avg_lat = round(sum(chart_data) / len(chart_data), 2) if chart_data else 0
         
-        up_checks = [c for c in checks if 0 < c.status_code < 400]
+        up_checks = [c for c in checks if c.status_code == 200]
         uptime_pct = round((len(up_checks) / len(checks)) * 100, 2) if checks else 0
         
         change_str = datetime.fromtimestamp(monitor.last_state_change_ts, tz=pacific).strftime("%m/%d %I:%M %p %Z")
@@ -1112,7 +1116,7 @@ async def run_check(monitor_id: int, url: str):
         error_message = repr(ex)
 
     dur = int((time.perf_counter() - start) * 1000)
-    is_success = 0 < code < 400
+    is_success = code == 200
 
     async with AsyncSessionLocal() as session:
         m = await session.get(Monitor, monitor_id)
@@ -1135,7 +1139,7 @@ async def run_check(monitor_id: int, url: str):
         if not is_success:
             consecutive_failures = 1
             for c in recent_checks:
-                if c.status_code == 0:
+                if c.status_code != 200:
                     consecutive_failures += 1
                 else:
                     break
