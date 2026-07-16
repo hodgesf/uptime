@@ -27,15 +27,15 @@ ENDPOINTS = [
 ]
 
 # ARAX endpoints report their build via the ARAX status API rather than a
-# /code_version route. Map each monitored URL to its site_config URL (note CI
-# needs /test inserted). The reported version is the `tier0-YYYYMMDD` token from
-# curie_to_pmids_version.
-ARAX_STATUS_URLS = {
-    "https://arax.ncats.io": "https://arax.ncats.io/api/arax/v1.4/status?mode=site_config",
-    "https://arax.ncats.io/test": "https://arax.ncats.io/test/api/arax/v1.4/status?mode=site_config",
-    "https://arax.ncats.io/beta": "https://arax.ncats.io/beta/api/arax/v1.4/status?mode=site_config",
-    "https://arax.ci.transltr.io": "https://arax.ci.transltr.io/test/api/arax/v1.4/status?mode=site_config",
+# /code_version route: append the suffix to the monitored URL. The reported
+# version is the `tier0-YYYYMMDD` token from curie_to_pmids_version.
+ARAX_ENDPOINTS = {
+    "https://arax.ncats.io",
+    "https://arax.ncats.io/test",
+    "https://arax.ncats.io/beta",
+    "https://arax.ci.transltr.io",
 }
+ARAX_STATUS_SUFFIX = "/api/arax/v1.4/status?mode=site_config"
 
 import os
 import re
@@ -599,8 +599,8 @@ async def fetch_arax_version(status_url: str) -> str | None:
 async def fetch_code_version(url: str) -> str | None:
     """Fetch a display version string for a monitor, or None. ARAX endpoints use
     the ARAX status API; everyone else uses {url}/code_version."""
-    if url in ARAX_STATUS_URLS:
-        return await fetch_arax_version(ARAX_STATUS_URLS[url])
+    if url in ARAX_ENDPOINTS:
+        return await fetch_arax_version(url + ARAX_STATUS_SUFFIX)
     try:
         cv = await http_client.get(f"{url}/code_version", timeout=5.0)
         if cv.status_code != 200:
