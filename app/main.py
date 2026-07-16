@@ -1,6 +1,8 @@
 import asyncio
 import time
 import json
+import ssl
+import socket
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
@@ -9,7 +11,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from .database import Base, engine, AsyncSessionLocal
 from .models import Monitor, Check, StateEvent
 
@@ -62,6 +64,17 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 # per monitor, and never while holding a DB session open.
 CODE_VERSION_REFRESH = 300  # seconds
 _last_code_version_fetch: dict[int, float] = {}
+
+# How long to keep raw per-check samples; older rows are pruned. Uptime history
+# lives in StateEvent (never pruned), so this does not affect uptime fidelity.
+RETENTION_DAYS = 35
+PRUNE_INTERVAL = 6 * 3600  # seconds
+
+# TLS certificate expiry is refreshed at most this often per monitor and cached
+# in memory (re-checked shortly after each restart).
+CERT_REFRESH = 6 * 3600  # seconds
+_last_cert_fetch: dict[int, float] = {}
+_cert_expiry: dict[int, int | None] = {}
 
 def parse_build_metadata(description: str):
     build_dt = None
@@ -128,8 +141,10 @@ async def lifespan(app: FastAPI):
         await session.commit()
 
     checker_task = asyncio.create_task(checker_loop())
+    prune_task = asyncio.create_task(prune_loop())
     yield
     checker_task.cancel()
+    prune_task.cancel()
     await http_client.aclose()
 
 app = FastAPI(lifespan=lifespan)
@@ -244,6 +259,75 @@ def overall_uptime(daily):
     up = sum(d["up_seconds"] for d in daily)
     return round(up / total * 100, 3) if total > 0 else None
 
+
+def _down_overlaps(events, now_ts, win_start):
+    """Yield the seconds of downtime each DOWN interval contributes within
+    [win_start, now_ts]."""
+    evs = sorted(events, key=lambda e: e.changed_at_ts)
+    for i, e in enumerate(evs):
+        if e.is_up:
+            continue
+        start = e.changed_at_ts
+        end = evs[i + 1].changed_at_ts if i + 1 < len(evs) else now_ts
+        overlap = min(end, now_ts) - max(start, win_start)
+        if overlap > 0:
+            yield overlap
+
+
+def uptime_over(events, now_ts, window_seconds):
+    """Time-weighted uptime % over the last `window_seconds`, clamped to when
+    monitoring began. None if there is no data yet."""
+    evs = sorted(events, key=lambda e: e.changed_at_ts)
+    if not evs:
+        return None
+    win_start = max(now_ts - window_seconds, evs[0].changed_at_ts)
+    total = now_ts - win_start
+    if total <= 0:
+        return None
+    down = sum(_down_overlaps(evs, now_ts, win_start))
+    return round((total - down) / total * 100, 3)
+
+
+def incident_summary(events, now_ts, window_seconds):
+    """Outage count, total downtime, and longest outage within the window."""
+    overlaps = list(_down_overlaps(events, now_ts, now_ts - window_seconds))
+    return {
+        "count": len(overlaps),
+        "total_down": sum(overlaps),
+        "longest": max(overlaps, default=0),
+    }
+
+
+def percentile(values, p):
+    """Linear-interpolated percentile (p in [0,1]) of a numeric list."""
+    if not values:
+        return 0
+    s = sorted(values)
+    if len(s) == 1:
+        return s[0]
+    k = (len(s) - 1) * p
+    lo = int(k)
+    hi = min(lo + 1, len(s) - 1)
+    return s[lo] + (s[hi] - s[lo]) * (k - lo)
+
+
+def _get_cert_expiry_ts(url):
+    """Epoch seconds when the TLS cert expires, or None. Blocking — call via
+    asyncio.to_thread()."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return None
+    host, port = parsed.hostname, parsed.port or 443
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=8) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+        not_after = cert.get("notAfter") if cert else None
+        return int(ssl.cert_time_to_seconds(not_after)) if not_after else None
+    except Exception:
+        return None
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     return templates.TemplateResponse(request, "dashboard.html")
@@ -278,30 +362,36 @@ async def monitor_detail(request: Request, monitor_id: int):
             .order_by(StateEvent.changed_at_ts.asc())
         )).scalars().all()
 
-    # 30-day daily uptime for the status-bar strip
+    # 30-day daily buckets for the status-bar strip
     daily = compute_daily_status(all_events, now_ts, pacific, days=30)
-    uptime_30d = overall_uptime(daily)
 
-    # Prep Stats - only calculate if first check has completed
-    if monitor.last_state_change_ts is not None:
-        chart_data = [c.response_time_ms for c in checks]
-        # Ensure checked_at is treated as UTC before converting to Pacific
-        chart_labels = []
-        for c in checks:
-            # If datetime is naive, assume it's UTC; if it has tzinfo, use as-is
-            dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
-            chart_labels.append(dt.astimezone(pacific).strftime('%I:%M %p %Z'))
-        avg_lat = round(sum(chart_data) / len(chart_data), 2) if chart_data else 0
-        up_checks = [c for c in checks if c.status_code == 200]
-        uptime_pct = round((len(up_checks) / len(checks)) * 100, 2) if checks else 0
-        time_in_status_sec = now_ts - monitor.last_state_change_ts
-        time_in_status_str = format_duration_str(time_in_status_sec)
-    else:
-        chart_data = []
-        chart_labels = []
-        avg_lat = 0
-        uptime_pct = 0
-        time_in_status_str = "Pending"
+    # Latency stats (24h) from raw checks; downsample the chart to 5-min buckets.
+    latencies = [c.response_time_ms for c in checks]
+    avg_lat = round(sum(latencies) / len(latencies), 1) if latencies else 0
+    p95_lat = round(percentile(latencies, 0.95)) if latencies else 0
+
+    LAT_BUCKET = 300  # seconds per chart point
+    bins: dict[int, list] = {}
+    for c in checks:
+        dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
+        ts = int(dt.timestamp())
+        bins.setdefault(ts - (ts % LAT_BUCKET), []).append(c.response_time_ms)
+    chart_points = sorted(bins.items())
+    chart_data = [round(sum(v) / len(v)) for _, v in chart_points]
+    chart_labels = [datetime.fromtimestamp(b, tz=pacific).strftime('%I:%M %p') for b, _ in chart_points]
+
+    time_in_status_str = (
+        format_duration_str(now_ts - monitor.last_state_change_ts)
+        if monitor.last_state_change_ts is not None else "Pending"
+    )
+
+    # Uptime windows and 30-day incident summary (from StateEvents).
+    up_24h = uptime_over(all_events, now_ts, 86400)
+    up_7d = uptime_over(all_events, now_ts, 7 * 86400)
+    up_30d = uptime_over(all_events, now_ts, 30 * 86400)
+    incidents = incident_summary(all_events, now_ts, 30 * 86400)
+    cert_ts = _cert_expiry.get(monitor_id)
+    cert_days = (cert_ts - now_ts) // 86400 if cert_ts else None
 
     if monitor.is_up is None:
         status_label, status_class = "INITIALIZING...", "pending"
@@ -455,9 +545,15 @@ async def monitor_detail(request: Request, monitor_id: int):
             "initialized": monitor.last_state_change_ts is not None,
             "time_in_status_str": time_in_status_str,
             "avg_lat": avg_lat,
-            "uptime_pct": uptime_pct,
+            "p95_lat": p95_lat,
             "daily": daily,
-            "uptime_30d": uptime_30d,
+            "uptime_24h": up_24h,
+            "uptime_7d": up_7d,
+            "uptime_30d": up_30d,
+            "incident_count": incidents["count"],
+            "total_down_str": "0m" if incidents["total_down"] == 0 else format_duration_str(incidents["total_down"]),
+            "longest_down_str": "—" if incidents["longest"] == 0 else format_duration_str(incidents["longest"]),
+            "cert_days": cert_days,
             "downtime_html": downtime_section_html,
             "raw_logs_html": raw_logs,
             "chart_labels": chart_labels,
@@ -593,6 +689,23 @@ async def checker_loop():
             traceback.print_exc()
         await asyncio.sleep(CHECK_INTERVAL)
 
+
+async def prune_loop():
+    """Periodically delete raw check samples older than RETENTION_DAYS. Uptime
+    history lives in StateEvent and is never pruned."""
+    while True:
+        try:
+            cutoff = datetime.now(ZoneInfo("UTC")) - timedelta(days=RETENTION_DAYS)
+            async with AsyncSessionLocal() as session:
+                res = await session.execute(delete(Check).where(Check.checked_at < cutoff))
+                await session.commit()
+                if res.rowcount:
+                    print(f"[PRUNE] Deleted {res.rowcount} checks older than {RETENTION_DAYS}d")
+        except Exception as e:
+            print(f"[PRUNE ERROR] {type(e).__name__}: {e}")
+        await asyncio.sleep(PRUNE_INTERVAL)
+
+
 FAIL_THRESHOLD = 2  # require N consecutive failures before marking DOWN
 
 
@@ -687,6 +800,11 @@ async def run_check(monitor_id: int, url: str):
         if now_mono - _last_code_version_fetch.get(monitor_id, 0.0) >= CODE_VERSION_REFRESH:
             new_code_version = await fetch_code_version(url)
             _last_code_version_fetch[monitor_id] = now_mono
+
+        # Refresh TLS cert expiry (cached in memory), throttled per monitor.
+        if now_mono - _last_cert_fetch.get(monitor_id, 0.0) >= CERT_REFRESH:
+            _cert_expiry[monitor_id] = await asyncio.to_thread(_get_cert_expiry_ts, url)
+            _last_cert_fetch[monitor_id] = now_mono
 
     async with AsyncSessionLocal() as session:
         m = await session.get(Monitor, monitor_id)

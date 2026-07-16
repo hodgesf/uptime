@@ -16,6 +16,10 @@
         .hero { padding: 22px 24px; margin-bottom: 16px; }
         .strip-pct.big { font-size: 26px; }
         .strip { display: inline-block; max-width: 100%; }
+        .windows { display: flex; gap: 10px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+        .win { flex: 1; text-align: center; }
+        .win-pct { display: block; font-family: var(--font-display); font-weight: 600; font-size: 17px; font-variant-numeric: tabular-nums; }
+        .win-label { display: block; font-size: 11px; color: var(--muted); margin-top: 3px; text-transform: uppercase; letter-spacing: .04em; }
 
         .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
         .stat { padding: 16px 18px; }
@@ -24,6 +28,7 @@
         .stat .v.up { color: var(--up); }
         .stat .v.down { color: var(--down); }
         .stat .v.pending { color: var(--muted); }
+        .stat .v.warn { color: var(--degraded); }
         @media (max-width: 680px) { .stats { grid-template-columns: repeat(2, 1fr); } }
 
         details.panel { margin-bottom: 12px; padding: 4px 20px; }
@@ -60,6 +65,11 @@
             </div>
             <div class="strip-foot"><span>30 days ago</span><span>Today</span></div>
         </div>
+        <div class="windows">
+            <div class="win"><span class="win-pct num">{% if uptime_24h is not none %}{{ uptime_24h }}%{% else %}—{% endif %}</span><span class="win-label">24 hours</span></div>
+            <div class="win"><span class="win-pct num">{% if uptime_7d is not none %}{{ uptime_7d }}%{% else %}—{% endif %}</span><span class="win-label">7 days</span></div>
+            <div class="win"><span class="win-pct num">{% if uptime_30d is not none %}{{ uptime_30d }}%{% else %}—{% endif %}</span><span class="win-label">30 days</span></div>
+        </div>
     </div>
 
     <div class="stats">
@@ -76,8 +86,26 @@
             <div class="v num">{% if initialized %}{{ avg_lat }} ms{% else %}—{% endif %}</div>
         </div>
         <div class="stat card">
-            <h4>Uptime · 30d</h4>
-            <div class="v num">{% if uptime_30d is not none %}{{ uptime_30d }}%{% else %}—{% endif %}</div>
+            <h4>p95 latency · 24h</h4>
+            <div class="v num">{% if initialized %}{{ p95_lat }} ms{% else %}—{% endif %}</div>
+        </div>
+        <div class="stat card">
+            <h4>Incidents · 30d</h4>
+            <div class="v num">{{ incident_count }}</div>
+        </div>
+        <div class="stat card">
+            <h4>Total downtime · 30d</h4>
+            <div class="v num">{{ total_down_str }}</div>
+        </div>
+        <div class="stat card">
+            <h4>Longest outage · 30d</h4>
+            <div class="v num">{{ longest_down_str }}</div>
+        </div>
+        <div class="stat card">
+            <h4>TLS cert</h4>
+            <div class="v num {% if cert_days is not none and cert_days < 14 %}down{% elif cert_days is not none and cert_days < 30 %}warn{% endif %}">
+                {% if cert_days is none %}—{% elif cert_days < 0 %}Expired{% else %}{{ cert_days }}d left{% endif %}
+            </div>
         </div>
     </div>
 
