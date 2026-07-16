@@ -24,6 +24,10 @@ ENDPOINTS = [
     "https://arax.ncats.io/test",
     "https://arax.ncats.io/beta",
     "https://arax.ci.transltr.io",
+    "https://arax.ncats.io/shepherd",
+    "https://arax.ncats.io/devED",
+    "https://arax.ncats.io/devLM",
+    "https://arax.ncats.io/legacy",
 ]
 
 # ARAX endpoints report their build via the ARAX status API rather than a
