@@ -15,6 +15,7 @@
 
         .hero { padding: 22px 24px; margin-bottom: 16px; }
         .strip-pct.big { font-size: 26px; }
+        .strip { display: inline-block; max-width: 100%; }
 
         .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
         .stat { padding: 16px 18px; }
@@ -51,12 +52,14 @@
             <span class="strip-label">Last 30 days</span>
             <span class="strip-pct big num">{% if uptime_30d is not none %}{{ uptime_30d }}%{% else %}—{% endif %}</span>
         </div>
-        <div class="bars">
-            {% for d in daily %}
-            <div class="bar {{ d.status }}" title="{{ d.date }} — {% if d.uptime is none %}No data{% else %}{{ d.uptime }}% uptime{% endif %}"></div>
-            {% endfor %}
+        <div class="strip">
+            <div class="bars">
+                {% for d in daily %}
+                <div class="bar {{ d.status }}" title="{{ d.date }} — {% if d.uptime is none %}No data{% else %}{{ d.uptime }}% uptime{% endif %}"></div>
+                {% endfor %}
+            </div>
+            <div class="strip-foot"><span>30 days ago</span><span>Today</span></div>
         </div>
-        <div class="strip-foot"><span>30 days ago</span><span>Today</span></div>
     </div>
 
     <div class="stats">
