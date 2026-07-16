@@ -11,6 +11,8 @@ __pycache__/
 *.db
 *.sqlite3
 uptime.db
+*.db-wal
+*.db-shm
 
 
 # OS files

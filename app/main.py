@@ -547,12 +547,15 @@ async def api_monitor_detail(monitor_id: int):
 async def checker_loop():
     while True:
         try:
+            # Read the monitor list and release the session BEFORE running checks,
+            # so we don't hold a read transaction open while run_check() writes.
             async with AsyncSessionLocal() as session:
                 monitors = (await session.execute(select(Monitor))).scalars().all()
-                print(f"[CHECKER] Running checks for {len(monitors)} monitors...")
-                await asyncio.gather(*[run_check(m.id, m.url) for m in monitors])
-                print(f"[CHECKER] Checks completed")
-        except Exception as e: 
+                targets = [(m.id, m.url) for m in monitors]
+            print(f"[CHECKER] Running checks for {len(targets)} monitors...")
+            await asyncio.gather(*[run_check(mid, url) for mid, url in targets])
+            print(f"[CHECKER] Checks completed")
+        except Exception as e:
             print(f"[CHECKER ERROR] {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
