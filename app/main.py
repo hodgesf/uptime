@@ -162,9 +162,31 @@ def format_duration_str(seconds):
     return " ".join(parts) if parts else "<1m"
 
 
-def compute_daily_status(events, now_ts, tz, days=30):
-    """Reconstruct per-day up/down status for the last `days` days from state
-    events. Returns a list (oldest first) of dicts:
+def _bucket_boundaries(now_ts, tz, count, unit):
+    """`count` consecutive (start_ts, end_ts, label) buckets ending with the
+    one containing now. unit is 'hour' (clock-hour aligned) or 'day' (midnight
+    aligned, tz-aware)."""
+    now_local = datetime.fromtimestamp(now_ts, tz)
+    if unit == "hour":
+        anchor = now_local.replace(minute=0, second=0, microsecond=0)
+        step = timedelta(hours=1)
+        fmt = "%-I %p"
+    else:  # day
+        anchor = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        step = timedelta(days=1)
+        fmt = "%b %-d"
+    out = []
+    for i in range(count - 1, -1, -1):
+        start_local = anchor - i * step
+        end_local = start_local + step
+        out.append((int(start_local.timestamp()), int(end_local.timestamp()),
+                    start_local.strftime(fmt)))
+    return out
+
+
+def compute_uptime_buckets(events, now_ts, tz, count, unit):
+    """Reconstruct per-bucket up/down status over the last `count` buckets from
+    state events. Returns a list (oldest first) of dicts:
         {date, status: up|down|degraded|nodata, uptime: float|None,
          down_seconds, up_seconds, total_seconds}
     """
@@ -180,19 +202,10 @@ def compute_daily_status(events, now_ts, tz, days=30):
         if end > start:
             intervals.append((start, end, e.is_up))
 
-    now_local = datetime.fromtimestamp(now_ts, tz)
-    today_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-
     result = []
-    for d in range(days - 1, -1, -1):
-        day_start_local = today_midnight - timedelta(days=d)
-        day_end_local = day_start_local + timedelta(days=1)
-        day_start = int(day_start_local.timestamp())
-        day_end = int(day_end_local.timestamp())
-        label = day_start_local.strftime("%b %-d")
-
-        eff_end = min(day_end, now_ts)
-        eff_start = day_start if monitoring_start is None else max(day_start, monitoring_start)
+    for b_start, b_end, label in _bucket_boundaries(now_ts, tz, count, unit):
+        eff_end = min(b_end, now_ts)
+        eff_start = b_start if monitoring_start is None else max(b_start, monitoring_start)
 
         if monitoring_start is None or eff_end <= eff_start:
             result.append({"date": label, "status": "nodata", "uptime": None,
@@ -219,6 +232,10 @@ def compute_daily_status(events, now_ts, tz, days=30):
                        "down_seconds": int(down), "up_seconds": int(up_sec),
                        "total_seconds": int(total)})
     return result
+
+
+def compute_daily_status(events, now_ts, tz, days=30):
+    return compute_uptime_buckets(events, now_ts, tz, days, "day")
 
 
 def overall_uptime(daily):
@@ -470,7 +487,7 @@ async def status():
             change_str = datetime.fromtimestamp(m.last_state_change_ts, tz=pacific).strftime("%b %-d, %-I:%M %p %Z")
         else:
             change_str = "Pending"
-        daily = compute_daily_status(events_by_monitor.get(m.id, []), now_ts, pacific, days=30)
+        hourly = compute_uptime_buckets(events_by_monitor.get(m.id, []), now_ts, pacific, 24, "hour")
         result.append({
             "id": m.id,
             "url": m.url,
@@ -478,8 +495,8 @@ async def status():
             "last_state_change_ts": m.last_state_change_ts or 0,
             "last_state_change_str": change_str,
             "code_version": m.code_version,
-            "uptime_30d": overall_uptime(daily),
-            "daily": [{"date": d["date"], "status": d["status"], "uptime": d["uptime"]} for d in daily],
+            "uptime_24h": overall_uptime(hourly),
+            "bars": [{"date": d["date"], "status": d["status"], "uptime": d["uptime"]} for d in hourly],
         })
     return result
 

@@ -26,6 +26,7 @@
         .m-meta .sep { opacity: .45; }
         .m-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 7px; }
         .m-uptime { font-family: var(--font-display); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
+        .m-range { font-weight: 500; opacity: .6; }
         @media (max-width: 620px) {
             .monitor-card { flex-direction: column; align-items: stretch; gap: 13px; }
             .m-right { align-items: flex-start; }
@@ -94,7 +95,7 @@
                     </div>
                     <div class="m-right">
                         <div class="bars mini" data-bars></div>
-                        <span class="m-uptime num" data-uptime></span>
+                        <span class="m-uptime"><span class="num" data-uptime></span> <span class="m-range">· 24h</span></span>
                     </div>`;
                 container.appendChild(el);
                 rows[m.id] = el;
@@ -109,8 +110,8 @@
             else if (m.is_up) { pill.className = 'pill up'; statusText.textContent = 'Up'; since.dataset.verb = 'up'; }
             else { pill.className = 'pill down'; statusText.textContent = 'Down'; since.dataset.verb = 'down'; }
 
-            el.querySelector('[data-uptime]').textContent = (m.uptime_30d === null || m.uptime_30d === undefined) ? '—' : m.uptime_30d + '%';
-            el.querySelector('[data-bars]').innerHTML = barsHtml(m.daily);
+            el.querySelector('[data-uptime]').textContent = (m.uptime_24h === null || m.uptime_24h === undefined) ? '—' : m.uptime_24h + '%';
+            el.querySelector('[data-bars]').innerHTML = barsHtml(m.bars);
 
             since.dataset.ts = m.last_state_change_ts || 0;
             renderSince(since);
