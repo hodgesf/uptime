@@ -26,6 +26,17 @@ ENDPOINTS = [
     "https://arax.ci.transltr.io",
 ]
 
+# ARAX endpoints report their build via the ARAX status API rather than a
+# /code_version route. Map each monitored URL to its site_config URL (note CI
+# needs /test inserted). The reported version is the `tier0-YYYYMMDD` token from
+# curie_to_pmids_version.
+ARAX_STATUS_URLS = {
+    "https://arax.ncats.io": "https://arax.ncats.io/api/arax/v1.4/status?mode=site_config",
+    "https://arax.ncats.io/test": "https://arax.ncats.io/test/api/arax/v1.4/status?mode=site_config",
+    "https://arax.ncats.io/beta": "https://arax.ncats.io/beta/api/arax/v1.4/status?mode=site_config",
+    "https://arax.ci.transltr.io": "https://arax.ci.transltr.io/test/api/arax/v1.4/status?mode=site_config",
+}
+
 import os
 import re
 from urllib.parse import urlparse
@@ -564,8 +575,32 @@ async def checker_loop():
 FAIL_THRESHOLD = 2  # require N consecutive failures before marking DOWN
 
 
+def parse_arax_version(data: dict) -> str | None:
+    """Pull the reportable version (the tier0-YYYYMMDD token from
+    curie_to_pmids_version) out of an ARAX status site_config payload."""
+    cfg = data.get("config", {}) if isinstance(data, dict) else {}
+    m = re.search(r"tier0-\d{8}", cfg.get("curie_to_pmids_version", "") or "")
+    if not m:
+        return None
+    arax_ver = cfg.get("arax_version")
+    return f"{m.group(0)} (ARAX {arax_ver})" if arax_ver else m.group(0)
+
+
+async def fetch_arax_version(status_url: str) -> str | None:
+    try:
+        r = await http_client.get(status_url, timeout=8.0, follow_redirects=True)
+        if r.status_code != 200:
+            return None
+        return parse_arax_version(r.json())
+    except Exception:
+        return None
+
+
 async def fetch_code_version(url: str) -> str | None:
-    """Fetch and parse {url}/code_version into a display string, or None."""
+    """Fetch a display version string for a monitor, or None. ARAX endpoints use
+    the ARAX status API; everyone else uses {url}/code_version."""
+    if url in ARAX_STATUS_URLS:
+        return await fetch_arax_version(ARAX_STATUS_URLS[url])
     try:
         cv = await http_client.get(f"{url}/code_version", timeout=5.0)
         if cv.status_code != 200:

@@ -112,8 +112,10 @@
             const build = el.querySelector('[data-build]');
             let bd = '';
             if (m.code_version) {
-                const mm = m.code_version.match(/(\d{4}-\d{2}-\d{2})/);
-                if (mm) bd = 'build ' + mm[1];
+                const tier = m.code_version.match(/tier0-\d{8}/);
+                const date = m.code_version.match(/(\d{4}-\d{2}-\d{2})/);
+                if (tier) bd = tier[0];
+                else if (date) bd = 'build ' + date[1];
                 build.title = m.code_version;
             }
             build.innerHTML = bd ? `<span class="sep">·</span> ${bd}` : '';
