@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+
+{% block title %}Endpoint Monitor{% endblock %}
+{% block heading %}System Status{% endblock %}
+
+{% block styles %}
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        th, td {
+            padding: 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background-color: var(--header-bg);
+            color: var(--header-text);
+            font-weight: 600;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        tr:hover {
+            background-color: var(--table-hover);
+        }
+
+        .endpoint-link {
+            color: var(--link-color);
+            font-size: 0.9em;
+            font-weight: 500;
+        }
+
+        .code-version-container {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .code-version-summary {
+            font-weight: 500;
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+
+        .code-version-link {
+            color: var(--link-color);
+            font-size: 0.8em;
+            text-decoration: none;
+            cursor: pointer;
+            margin-top: 4px;
+            display: inline-block;
+            font-weight: 500;
+        }
+
+        .code-version-link:hover {
+            text-decoration: underline;
+        }
+
+        .code-version-details {
+            max-width: 450px;
+            max-height: 0;
+            overflow: hidden;
+            white-space: pre-wrap;
+            font-size: 13px;
+            padding: 0px 8px;
+            border: none;
+            background: var(--code-bg);
+            margin-top: 0px;
+            border-radius: 4px;
+            transition: max-height 0.3s ease, padding 0.3s ease, border 0.3s ease, margin-top 0.3s ease;
+            color: var(--text-primary);
+        }
+
+        .code-version-details.expanded {
+            max-height: 120px;
+            overflow-y: auto;
+            padding: 8px;
+            border: 1px solid var(--code-border);
+            margin-top: 8px;
+        }
+{% endblock %}
+
+{% block content %}
+    <table>
+        <thead>
+            <tr>
+                <th>Endpoint</th>
+                <th>Status</th>
+                <th>Status Since</th>
+                <th>Duration</th>
+                <th>Code Version</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="monitor-body"></tbody>
+    </table>
+{% endblock %}
+
+{% block scripts %}
+    <script>
+        let rowRefs = {};
+
+        async function loadStatus() {
+            try {
+                const res = await fetch("/status");
+                const data = await res.json();
+                const tbody = document.getElementById("monitor-body");
+                data.forEach(m => {
+                    if (!rowRefs[m.url]) {
+                        const row = document.createElement("tr");
+                        row.innerHTML = `
+                            <td><a href="/monitor/${m.id}">${m.url}</a></td>
+                            <td class="status-cell"></td>
+                            <td class="status-since"></td>
+                            <td class="state-time"></td>
+                            <td>
+                                <div class="code-version-container">
+                                    <div class="code-version-summary"></div>
+                                    <a class="code-version-link">show more</a>
+                                    <div class="code-version-details"></div>
+                                </div>
+                            </td>
+                            <td><a href="${m.url}" target="_blank" rel="noopener noreferrer" class="endpoint-link">visit endpoint</a></td>
+                        `;
+                        tbody.appendChild(row);
+                        rowRefs[m.url] = {
+                            statusCell: row.querySelector(".status-cell"),
+                            sinceCell: row.querySelector(".status-since"),
+                            timeCell: row.querySelector(".state-time"),
+                            codeSummary: row.querySelector(".code-version-summary"),
+                            codeDetails: row.querySelector(".code-version-details"),
+                            codeLink: row.querySelector(".code-version-link"),
+                            codeContainer: row.querySelector(".code-version-container"),
+                            ts: m.last_state_change_ts
+                        };
+                    }
+
+                    const ref = rowRefs[m.url];
+
+                    if (m.is_up === null) {
+                        ref.statusCell.textContent = 'CHECKING...';
+                        ref.statusCell.className = 'pending';
+                    } else {
+                        ref.statusCell.textContent = m.is_up ? 'UP' : 'DOWN';
+                        ref.statusCell.className = m.is_up ? 'up' : 'down';
+                    }
+                    ref.sinceCell.textContent = m.last_state_change_str;
+                    ref.ts = m.last_state_change_ts;
+
+                    // Extract build date from code_version (look for "done on" followed by date)
+                    const codeVersionText = m.code_version || "—";
+                    let buildDate = "Unknown";
+                    const dateMatch = codeVersionText.match(/done on\s+(\d{4}-\d{2}-\d{2})/);
+                    if (dateMatch) {
+                        buildDate = dateMatch[1];
+                    } else {
+                        // Fallback: look for any date pattern in YYYY-MM-DD format
+                        const anyDateMatch = codeVersionText.match(/(\d{4}-\d{2}-\d{2})/);
+                        if (anyDateMatch) {
+                            buildDate = anyDateMatch[1];
+                        }
+                    }
+
+                    ref.codeSummary.textContent = buildDate;
+                    ref.codeDetails.innerHTML = codeVersionText;
+
+                    // Add click handler for toggle (only once)
+                    if (!ref.codeLink.hasClickHandler) {
+                        ref.codeLink.addEventListener('click', (e) => {
+                            e.preventDefault();
+                            ref.codeDetails.classList.toggle('expanded');
+                            ref.codeLink.textContent = ref.codeDetails.classList.contains('expanded') ? 'show less' : 'show more';
+                        });
+                        ref.codeLink.hasClickHandler = true;
+                    }
+                });
+            } catch (e) { console.error(e); }
+        }
+
+        function updateTimers() {
+            const now = Math.floor(Date.now() / 1000);
+            Object.values(rowRefs).forEach(ref => {
+                if (ref.ts === 0) {
+                    ref.timeCell.textContent = 'Pending';
+                } else {
+                    const s = Math.max(0, now - ref.ts);
+                    const h = Math.floor(s / 3600);
+
+                    if (h >= 24) {
+                        const d = Math.floor(h / 24);
+                        const remainingH = h % 24;
+                        const m = Math.floor((s % 3600) / 60);
+                        const sec = s % 60;
+                        ref.timeCell.textContent = `${d}d ${remainingH}h ${m}m ${sec}s`;
+                    } else {
+                        const m = Math.floor((s % 3600) / 60);
+                        const sec = s % 60;
+                        ref.timeCell.textContent = `${h}h ${m}m ${sec}s`;
+                    }
+                }
+            });
+        }
+
+        loadStatus();
+        setInterval(loadStatus, 5000);
+        setInterval(updateTimers, 1000);
+    </script>
+{% endblock %}

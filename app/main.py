@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
@@ -26,14 +26,27 @@ ENDPOINTS = [
     "https://arax.ci.transltr.io",
 ]
 
-http_client = httpx.AsyncClient(timeout=10, verify=False)
-
 import os
+import re
+from urllib.parse import urlparse
+
+from fastapi.templating import Jinja2Templates
+
+# TLS verification is ON by default so an expired or broken certificate surfaces
+# as DOWN (usually what you want from an uptime monitor). Set TLS_VERIFY=false to
+# monitor hosts that serve self-signed or internal certificates.
+TLS_VERIFY = os.getenv("TLS_VERIFY", "true").strip().lower() not in ("0", "false", "no", "off")
+http_client = httpx.AsyncClient(timeout=10, verify=TLS_VERIFY)
 
 SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL")
 
-import re
-from urllib.parse import urlparse
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+
+# Build-metadata refresh throttle: re-fetch {url}/code_version at most this often
+# per monitor, and never while holding a DB session open.
+CODE_VERSION_REFRESH = 300  # seconds
+_last_code_version_fetch: dict[int, float] = {}
 
 def parse_build_metadata(description: str):
     build_dt = None
@@ -135,349 +148,12 @@ def format_duration_str(seconds):
     return " ".join(parts)
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard():
-    return """
-    <html>
-    <head>
-        <title>Endpoint Monitor</title>
-        <style>
-            :root {
-                --bg-primary: #ffffff;
-                --bg-secondary: #f8f9fa;
-                --text-primary: #1a1a1a;
-                --text-secondary: #666666;
-                --border-color: #e0e0e0;
-                --header-bg: #2c3e50;
-                --header-text: #ffffff;
-                --table-hover: #f5f5f5;
-                --up-color: #22c55e;
-                --down-color: #ef4444;
-                --pending-color: #9ca3af;
-                --link-color: #0066cc;
-                --code-bg: #f5f5f5;
-                --code-border: #d0d0d0;
-            }
-            
-            [data-theme="dark"] {
-                --bg-primary: #1e1e1e;
-                --bg-secondary: #2d2d2d;
-                --text-primary: #ffffff;
-                --text-secondary: #b0b0b0;
-                --border-color: #404040;
-                --header-bg: #1a2332;
-                --header-text: #ffffff;
-                --table-hover: #2d2d2d;
-                --up-color: #22c55e;
-                --down-color: #ff5252;
-                --pending-color: #9ca3af;
-                --link-color: #4da6ff;
-                --code-bg: #2d2d2d;
-                --code-border: #404040;
-            }
-            
-            body { 
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-                margin: 0;
-                padding: 20px 40px;
-                background: var(--bg-primary);
-                color: var(--text-primary);
-            }
-            
-            .header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 30px;
-            }
-            
-            h2 { 
-                margin: 0;
-                font-size: 28px;
-                font-weight: 600;
-            }
-            
-            .theme-toggle {
-                background: var(--header-bg);
-                color: var(--header-text);
-                border: none;
-                padding: 8px 16px;
-                border-radius: 6px;
-                cursor: pointer;
-                font-size: 14px;
-                font-weight: 500;
-                transition: opacity 0.2s;
-            }
-            
-            .theme-toggle:hover {
-                opacity: 0.8;
-            }
-            
-            table { 
-                width: 100%; 
-                border-collapse: collapse; 
-                background: var(--bg-primary); 
-                border-radius: 8px; 
-                overflow: hidden; 
-                box-shadow: 0 2px 8px rgba(0,0,0,0.1); 
-            }
-            
-            th, td { 
-                padding: 16px; 
-                text-align: left; 
-                border-bottom: 1px solid var(--border-color); 
-            }
-            
-            th { 
-                background-color: var(--header-bg); 
-                color: var(--header-text);
-                font-weight: 600;
-                font-size: 13px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }
-            
-            tr:hover { 
-                background-color: var(--table-hover); 
-            }
-            
-            .up { 
-                color: var(--up-color); 
-                font-weight: 700;
-                font-size: 14px;
-            }
-            
-            .down { 
-                color: var(--down-color); 
-                font-weight: 700;
-                font-size: 14px;
-            }
-            
-            .pending { 
-                color: var(--pending-color); 
-                font-weight: 600; 
-                font-style: italic; 
-                font-size: 14px;
-            }
-            
-            a { 
-                color: var(--link-color); 
-                text-decoration: none; 
-                font-weight: 500; 
-            }
-            
-            a:hover { 
-                text-decoration: underline;
-            }
-            
-            .endpoint-link {
-                color: var(--link-color);
-                font-size: 0.9em;
-                font-weight: 500;
-            }
-            
-            .code-version-container {
-                display: flex;
-                flex-direction: column;
-            }
-            
-            .code-version-summary {
-                font-weight: 500;
-                color: var(--text-primary);
-                font-size: 14px;
-            }
-            
-            .code-version-link {
-                color: var(--link-color);
-                font-size: 0.8em;
-                text-decoration: none;
-                cursor: pointer;
-                margin-top: 4px;
-                display: inline-block;
-                font-weight: 500;
-            }
-            
-            .code-version-link:hover {
-                text-decoration: underline;
-            }
-            
-            .code-version-details {
-                max-width: 450px;
-                max-height: 0;
-                overflow: hidden;
-                white-space: pre-wrap;
-                font-size: 13px;
-                padding: 0px 8px;
-                border: none;
-                background: var(--code-bg);
-                margin-top: 0px;
-                border-radius: 4px;
-                transition: max-height 0.3s ease, padding 0.3s ease, border 0.3s ease, margin-top 0.3s ease;
-                color: var(--text-primary);
-            }
-            
-            .code-version-details.expanded {
-                max-height: 120px;
-                overflow-y: auto;
-                padding: 8px;
-                border: 1px solid var(--code-border);
-                margin-top: 8px;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h2>System Status</h2>
-            <button class="theme-toggle" onclick="toggleTheme()">🌙 Dark Mode</button>
-        </div>
-        <table>
-            <thead>
-                <tr>
-                    <th>Endpoint</th>
-                    <th>Status</th>
-                    <th>Status Since</th>
-                    <th>Duration</th>
-                    <th>Code Version</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody id="monitor-body"></tbody>
-        </table>
-        <script>
-            let rowRefs = {};
+async def dashboard(request: Request):
+    return templates.TemplateResponse(request, "dashboard.html")
 
-            async function loadStatus() {
-                try {
-                    const res = await fetch("/status");
-                    const data = await res.json();
-                    const tbody = document.getElementById("monitor-body");
-                    data.forEach(m => {
-                        if (!rowRefs[m.url]) {
-                            const row = document.createElement("tr");
-                            row.innerHTML = `
-                                <td><a href="/monitor/${m.id}">${m.url}</a></td>
-                                <td class="status-cell"></td>
-                                <td class="status-since"></td>
-                                <td class="state-time"></td>
-                                <td>
-                                    <div class="code-version-container">
-                                        <div class="code-version-summary"></div>
-                                        <a class="code-version-link">show more</a>
-                                        <div class="code-version-details"></div>
-                                    </div>
-                                </td>
-                                <td><a href="${m.url}" target="_blank" rel="noopener noreferrer" class="endpoint-link">visit endpoint</a></td>
-                            `;
-                            tbody.appendChild(row);
-                            rowRefs[m.url] = {
-                                statusCell: row.querySelector(".status-cell"),
-                                sinceCell: row.querySelector(".status-since"),
-                                timeCell: row.querySelector(".state-time"),
-                                codeSummary: row.querySelector(".code-version-summary"),
-                                codeDetails: row.querySelector(".code-version-details"),
-                                codeLink: row.querySelector(".code-version-link"),
-                                codeContainer: row.querySelector(".code-version-container"),
-                                ts: m.last_state_change_ts
-                            };
-                        }
-
-                        const ref = rowRefs[m.url];
-                        
-                        if (m.is_up === null) {
-                            ref.statusCell.textContent = 'CHECKING...';
-                            ref.statusCell.className = 'pending';
-                        } else {
-                            ref.statusCell.textContent = m.is_up ? 'UP' : 'DOWN';
-                            ref.statusCell.className = m.is_up ? 'up' : 'down';
-                        }
-                        ref.sinceCell.textContent = m.last_state_change_str;
-                        ref.ts = m.last_state_change_ts;
-                        
-                        // Extract build date from code_version (look for "done on" followed by date)
-                        const codeVersionText = m.code_version || "—";
-                        let buildDate = "Unknown";
-                        const dateMatch = codeVersionText.match(/done on\s+(\d{4}-\d{2}-\d{2})/);
-                        if (dateMatch) {
-                            buildDate = dateMatch[1];
-                        } else {
-                            // Fallback: look for any date pattern in YYYY-MM-DD format
-                            const anyDateMatch = codeVersionText.match(/(\d{4}-\d{2}-\d{2})/);
-                            if (anyDateMatch) {
-                                buildDate = anyDateMatch[1];
-                            }
-                        }
-                        
-                        ref.codeSummary.textContent = buildDate;
-                        ref.codeDetails.innerHTML = codeVersionText;
-                        
-                        // Add click handler for toggle (only once)
-                        if (!ref.codeLink.hasClickHandler) {
-                            ref.codeLink.addEventListener('click', (e) => {
-                                e.preventDefault();
-                                ref.codeDetails.classList.toggle('expanded');
-                                ref.codeLink.textContent = ref.codeDetails.classList.contains('expanded') ? 'show less' : 'show more';
-                            });
-                            ref.codeLink.hasClickHandler = true;
-                        }
-                    });
-                } catch (e) { console.error(e); }
-            }
-
-            function updateTimers() {
-                const now = Math.floor(Date.now() / 1000);
-                Object.values(rowRefs).forEach(ref => {
-                    if (ref.ts === 0) {
-                        ref.timeCell.textContent = 'Pending';
-                    } else {
-                        const s = Math.max(0, now - ref.ts);
-                        const h = Math.floor(s / 3600);
-                        
-                        if (h >= 24) {
-                            const d = Math.floor(h / 24);
-                            const remainingH = h % 24;
-                            const m = Math.floor((s % 3600) / 60);
-                            const sec = s % 60;
-                            ref.timeCell.textContent = `${d}d ${remainingH}h ${m}m ${sec}s`;
-                        } else {
-                            const m = Math.floor((s % 3600) / 60);
-                            const sec = s % 60;
-                            ref.timeCell.textContent = `${h}h ${m}m ${sec}s`;
-                        }
-                    }
-                });
-            }
-
-            loadStatus();
-            setInterval(loadStatus, 5000);
-            setInterval(updateTimers, 1000);
-            
-            // Dark mode toggle
-            function toggleTheme() {
-                const html = document.documentElement;
-                const isDark = html.getAttribute('data-theme') === 'dark';
-                const newTheme = isDark ? 'light' : 'dark';
-                html.setAttribute('data-theme', newTheme);
-                localStorage.setItem('theme', newTheme);
-                updateThemeButton();
-            }
-            
-            function updateThemeButton() {
-                const button = document.querySelector('.theme-toggle');
-                const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-                button.textContent = isDark ? '☀️ Light Mode' : '🌙 Dark Mode';
-            }
-            
-            // Initialize theme from localStorage or prefer dark mode
-            const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-            document.documentElement.setAttribute('data-theme', savedTheme);
-            updateThemeButton();
-            
-        </script>
-    </body>
-    </html>
-    """
 
 @app.get("/monitor/{monitor_id}", response_class=HTMLResponse)
-async def monitor_detail(monitor_id: int):
+async def monitor_detail(request: Request, monitor_id: int):
     pacific = ZoneInfo("America/Los_Angeles")
     now_ts = int(time.time())
     one_day_ago_dt = datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
@@ -524,6 +200,10 @@ async def monitor_detail(monitor_id: int):
         status_label, status_class = "INITIALIZING...", "pending"
     else:
         status_label, status_class = ("UP" if monitor.is_up else "DOWN"), ("up" if monitor.is_up else "down")
+
+    # Capture the current status now, before the downtime loop below reuses the
+    # `status_label` name for its per-check labels.
+    current_status_label, current_status_class = status_label, status_class
 
     # --- Fixed Timeline Formatting ---
     timeline_rows = []
@@ -604,20 +284,15 @@ async def monitor_detail(monitor_id: int):
                             # Naive datetime - assume UTC and convert
                             check_ts = int(c.checked_at.replace(tzinfo=ZoneInfo("UTC")).timestamp())
                         
-                        print(f"[DEBUG] Check: ts={check_ts}, down_start={down_start_ts}, recovery={recovery_ts}")
-                        
                         # Determine status: before down, during down, or after recovery
                         if check_ts < down_start_ts:
                             status_label = "Before Down"
                             before_down_checks.append(c)
-                            print(f"  -> Before Down")
                         elif check_ts >= recovery_ts:
                             status_label = "After Recovery"
                             after_recovery_checks.append(c)
-                            print(f"  -> After Recovery")
                         else:
                             status_label = "During Down"
-                            print(f"  -> During Down")
                         
                         status_color = "var(--down-color)" if status_label == "During Down" else "var(--text-secondary)"
                         code_color = "var(--down-color)" if c.status_code == 0 or c.status_code >= 400 else "var(--up-color)"
@@ -679,19 +354,9 @@ async def monitor_detail(monitor_id: int):
                         before_date = extract_build_date(last_before)
                         after_date = extract_build_date(first_after)
                         
-                        # Debug logging
-                        print(f"[DEBUG] Downtime event detected:")
-                        print(f"  before_down_checks: {len(before_down_checks)} checks")
-                        print(f"  after_recovery_checks: {len(after_recovery_checks)} checks")
-                        print(f"  last_before.code_version: {last_before.code_version[:50] if last_before.code_version else 'None'}...")
-                        print(f"  first_after.code_version: {first_after.code_version[:50] if first_after.code_version else 'None'}...")
-                        print(f"  before_date: {before_date}")
-                        print(f"  after_date: {after_date}")
-                        
                         if before_date and after_date and before_date != after_date:
                             code_version_changed = True
                             change_note = f' <span style="color: var(--link-color); font-weight: 500;">⚠️ Code version changed: {before_date} → {after_date}</span>'
-                            print(f"  ✅ CODE VERSION CHANGE DETECTED: {before_date} → {after_date}")
                     
                     downtime_sections.append(f'''
                     <details style="margin-bottom: 15px; border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; background: var(--card-bg);">
@@ -704,292 +369,26 @@ async def monitor_detail(monitor_id: int):
     
     downtime_section_html = "".join(downtime_sections) if downtime_sections else ""
 
-    return f"""
-    <html>
-    <head>
-        <title>{monitor.url}</title>
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        <style>
-            :root {{
-                --bg-primary: #ffffff;
-                --bg-secondary: #f8f9fa;
-                --text-primary: #1a1a1a;
-                --text-secondary: #666666;
-                --border-color: #e0e0e0;
-                --header-bg: #2c3e50;
-                --header-text: #ffffff;
-                --table-hover: #f5f5f5;
-                --up-color: #22c55e;
-                --down-color: #ef4444;
-                --pending-color: #9ca3af;
-                --link-color: #0066cc;
-                --code-bg: #f5f5f5;
-                --code-border: #d0d0d0;
-                --card-bg: #f8f9fa;
-                --card-border: #6366f1;
-            }}
-            
-            [data-theme="dark"] {{
-                --bg-primary: #1e1e1e;
-                --bg-secondary: #2d2d2d;
-                --text-primary: #ffffff;
-                --text-secondary: #b0b0b0;
-                --border-color: #404040;
-                --header-bg: #1a2332;
-                --header-text: #ffffff;
-                --table-hover: #2d2d2d;
-                --up-color: #22c55e;
-                --down-color: #ff5252;
-                --pending-color: #9ca3af;
-                --link-color: #4da6ff;
-                --code-bg: #2d2d2d;
-                --code-border: #404040;
-                --card-bg: #2d2d2d;
-                --card-border: #404040;
-            }}
-            
-            body {{ 
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-                margin: 0;
-                padding: 20px 40px;
-                background: var(--bg-primary);
-                color: var(--text-primary);
-            }}
-            
-            .header {{
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 30px;
-            }}
-            
-            h2 {{ 
-                margin: 0;
-                font-size: 28px;
-                font-weight: 600;
-            }}
-            
-            .theme-toggle {{
-                background: var(--header-bg);
-                color: var(--header-text);
-                border: none;
-                padding: 8px 16px;
-                border-radius: 6px;
-                cursor: pointer;
-                font-size: 14px;
-                font-weight: 500;
-                transition: opacity 0.2s;
-            }}
-            
-            .theme-toggle:hover {{
-                opacity: 0.8;
-            }}
-            
-            .container {{ 
-                max-width: 1000px; 
-                margin: auto; 
-                background: var(--bg-primary); 
-                padding: 30px; 
-                border-radius: 12px; 
-                box-shadow: 0 2px 8px rgba(0,0,0,0.1); 
-            }}
-            
-            .back-link {{
-                text-decoration: none;
-                color: var(--link-color);
-                font-weight: 500;
-            }}
-            
-            .back-link:hover {{
-                text-decoration: underline;
-            }}
-            
-            .stats-grid {{ 
-                display: grid; 
-                grid-template-columns: repeat(4, 1fr); 
-                gap: 15px; 
-                margin-bottom: 25px; 
-            }}
-            
-            .stat-card {{ 
-                background: var(--card-bg); 
-                padding: 15px; 
-                border-radius: 8px; 
-                border-left: 4px solid var(--card-border);
-            }}
-            
-            .stat-card h4 {{ 
-                margin: 0; 
-                font-size: 0.75em; 
-                color: var(--text-secondary); 
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-                font-weight: 600;
-            }}
-            
-            .stat-card p {{ 
-                margin: 8px 0 0; 
-                font-size: 1.2em; 
-                font-weight: 600;
-                color: var(--text-primary);
-            }}
-            
-            table {{ 
-                width: 100%; 
-                border-collapse: collapse;
-                background: var(--bg-primary);
-            }}
-            
-            th, td {{ 
-                padding: 12px; 
-                text-align: left; 
-                border-bottom: 1px solid var(--border-color);
-            }}
-            
-            th {{
-                background-color: var(--header-bg);
-                color: var(--header-text);
-                font-weight: 600;
-                font-size: 13px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }}
-            
-            tr:hover {{
-                background-color: var(--table-hover);
-            }}
-            
-            .up {{ 
-                color: var(--up-color); 
-                font-weight: 700;
-                font-size: 14px;
-            }}
-            
-            .down {{ 
-                color: var(--down-color); 
-                font-weight: 700;
-                font-size: 14px;
-            }}
-            
-            .pending {{ 
-                color: var(--pending-color); 
-                font-style: italic;
-                font-size: 14px;
-            }}
-            
-            details {{ 
-                margin-bottom: 15px; 
-                border: 1px solid var(--border-color); 
-                border-radius: 8px; 
-                padding: 10px;
-                background: var(--card-bg);
-            }}
-            
-            summary {{ 
-                font-weight: 600; 
-                cursor: pointer; 
-                padding: 5px;
-                color: var(--text-primary);
-            }}
-            
-            summary:hover {{
-                opacity: 0.8;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h2>{monitor.url}</h2>
-            <button class="theme-toggle" onclick="toggleTheme()">🌙 Dark Mode</button>
-        </div>
-        <div class="container">
-            <a href="/" class="back-link">← Back to Dashboard</a>
-            
-            <div class="stats-grid">
-                <div class="stat-card"><h4>Current Status</h4><p class='{status_class}'>{status_label}</p></div>
-                <div class="stat-card"><h4>Status Since</h4><p id="stat-duration">{'Initializing' if monitor.last_state_change_ts is None else time_in_status_str}</p></div>
-                <div class="stat-card"><h4>Avg Latency</h4><p>{'Initializing' if monitor.last_state_change_ts is None else f'{avg_lat}ms'}</p></div>
-                <div class="stat-card"><h4>24h Uptime</h4><p>{'Initializing' if monitor.last_state_change_ts is None else f'{uptime_pct}%'}</p></div>
-            </div>
+    return templates.TemplateResponse(
+        request,
+        "monitor.html",
+        {
+            "monitor_url": monitor.url,
+            "status_label": current_status_label,
+            "status_class": current_status_class,
+            "initialized": monitor.last_state_change_ts is not None,
+            "time_in_status_str": time_in_status_str,
+            "avg_lat": avg_lat,
+            "uptime_pct": uptime_pct,
+            "timeline_html": "".join(timeline_rows),
+            "downtime_html": downtime_section_html,
+            "raw_logs_html": raw_logs,
+            "chart_labels": chart_labels,
+            "chart_data": chart_data,
+            "start_ts": monitor.last_state_change_ts or 0,
+        },
+    )
 
-            <details>
-                <summary>Status Timeline (Last 24h)</summary>
-                <table>
-                    <thead><tr><th>State</th><th>Started At</th><th>Duration</th></tr></thead>
-                    <tbody>{"".join(timeline_rows)}</tbody>
-                </table>
-            </details>
-
-            {downtime_section_html}
-
-            <details>
-                <summary>Latency Graph & Metrics</summary>
-                <div style="padding:15px;">
-                    {'<p style="color: #9ca3af; font-style: italic;">Initializing - awaiting first check...</p>' if monitor.last_state_change_ts is None else f'<canvas id="latencyChart" height="100"></canvas>'}
-                </div>
-            </details>
-
-            <details>
-                <summary>Raw Request Logs</summary>
-                <table>
-                    <thead><tr><th>Time (PT)</th><th>Code</th></tr></thead>
-                    <tbody>{'<tr><td colspan="2" style="color: #9ca3af; font-style: italic; text-align: center;">Initializing - awaiting first check...</td></tr>' if monitor.last_state_change_ts is None else raw_logs}</tbody>
-                </table>
-            </details>
-        </div>
-        <script>
-            // Dark mode toggle
-            function toggleTheme() {{
-                const html = document.documentElement;
-                const isDark = html.getAttribute('data-theme') === 'dark';
-                const newTheme = isDark ? 'light' : 'dark';
-                html.setAttribute('data-theme', newTheme);
-                localStorage.setItem('theme', newTheme);
-                updateThemeButton();
-            }}
-            
-            function updateThemeButton() {{
-                const button = document.querySelector('.theme-toggle');
-                const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-                button.textContent = isDark ? '☀️ Light Mode' : '🌙 Dark Mode';
-            }}
-            
-            // Initialize theme from localStorage or prefer dark mode
-            const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-            document.documentElement.setAttribute('data-theme', savedTheme);
-            updateThemeButton();
-            
-            const startTs = {monitor.last_state_change_ts or 0};
-            function updateDetailTimer() {{
-                if (startTs === 0) return;  // Not initialized yet
-                const now = Math.floor(Date.now() / 1000);
-                const s = Math.max(0, now - startTs);
-                const h = Math.floor(s / 3600);
-                const m = Math.floor((s % 3600) / 60);
-                const sec = s % 60;
-                const str = `${{h}}h ${{m}}m ${{sec}}s`;
-                document.getElementById('stat-duration').textContent = str;
-                const liveDur = document.getElementById('live-duration');
-                if (liveDur) liveDur.textContent = str;
-            }}
-            setInterval(updateDetailTimer, 1000);
-
-            // Only initialize chart if data exists
-            const chartCanvas = document.getElementById('latencyChart');
-            if (chartCanvas) {{
-                new Chart(chartCanvas, {{
-                    type: 'line',
-                    data: {{
-                        labels: {json.dumps(chart_labels)},
-                        datasets: [{{ label: 'Latency (ms)', data: {json.dumps(chart_data)}, borderColor: '#6366f1', fill: true, tension: 0.3, pointRadius: 0 }}]
-                    }},
-                    options: {{ responsive: true, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ beginAtZero: true }} }} }}
-                }});
-            }}
-        </script>
-    </body>
-    </html>
-    """
 
 @app.get("/status")
 async def status():
@@ -1104,6 +503,51 @@ async def checker_loop():
 
 FAIL_THRESHOLD = 2  # require N consecutive failures before marking DOWN
 
+
+async def fetch_code_version(url: str) -> str | None:
+    """Fetch and parse {url}/code_version into a display string, or None."""
+    try:
+        cv = await http_client.get(f"{url}/code_version", timeout=5.0)
+        if cv.status_code != 200:
+            return None
+        data = cv.json()
+        build_nodes = data.get("endpoint_build_nodes", {})
+        rows = []
+        for name, node in build_nodes.items():
+            desc = node.get("description", "")
+
+            # code_version from the response key (kg2c) or parsed from the description (multiomics)
+            code_ver = node.get("code_version")
+            if not code_ver:
+                m_code = re.search(r"_v([\d\.]+)\.tsv", desc)
+                if m_code:
+                    code_ver = m_code.group(1)
+                m_code = re.search(r"kg2c-([\d\.]+-v[\d\.]+)", desc)
+                if m_code:
+                    code_ver = m_code.group(1)
+
+            biolink = node.get("biolink_version")
+            if not biolink:
+                m_biolink = re.search(r"Biolink version used was ([0-9\.]+)", desc)
+                if m_biolink:
+                    biolink = m_biolink.group(1)
+
+            build_dt = None
+            m_date = re.search(r"done on ([0-9\-:\. ]+)", desc)
+            if m_date:
+                build_dt = m_date.group(1)[:10]
+
+            rows.append(
+                f"<strong>name:</strong> {name}\n"
+                f"version: {code_ver or 'unknown'}\n"
+                f"biolink: {biolink or 'unknown'}\n"
+                f"build date: {build_dt or 'unknown'}"
+            )
+        return "\n\n".join(rows) if rows else None
+    except Exception:
+        return None
+
+
 async def run_check(monitor_id: int, url: str):
     start = time.perf_counter()
     code = 0
@@ -1117,6 +561,16 @@ async def run_check(monitor_id: int, url: str):
 
     dur = int((time.perf_counter() - start) * 1000)
     is_success = code == 200
+
+    # Refresh build metadata outside the DB session, and at most once per
+    # CODE_VERSION_REFRESH seconds per monitor, so we never hold a write
+    # transaction open across a network call or re-fetch identical data.
+    new_code_version = None
+    if is_success:
+        now_mono = time.monotonic()
+        if now_mono - _last_code_version_fetch.get(monitor_id, 0.0) >= CODE_VERSION_REFRESH:
+            new_code_version = await fetch_code_version(url)
+            _last_code_version_fetch[monitor_id] = now_mono
 
     async with AsyncSessionLocal() as session:
         m = await session.get(Monitor, monitor_id)
@@ -1147,54 +601,8 @@ async def run_check(monitor_id: int, url: str):
         confirmed_up = is_success
         confirmed_down = (not is_success) and consecutive_failures >= FAIL_THRESHOLD
 
-        # Fetch code version on every successful check
-        if confirmed_up:
-            try:
-                cv = await http_client.get(f"{url}/code_version", timeout=5.0)
-                if cv.status_code == 200:
-                    data = cv.json()
-                    build_nodes = data.get("endpoint_build_nodes", {})
-
-                    rows = []
-
-                    for name, node in build_nodes.items():
-                        desc = node.get("description", "")
-                        
-                        # Get code_version from response key (for kg2c) or from description (for multiomics)
-                        code_ver = node.get("code_version")
-                        if not code_ver:
-                            # For multiomics, extract from description
-                            m_code = re.search(r"_v([\d\.]+)\.tsv", desc)
-                            if m_code:
-                                code_ver = m_code.group(1)
-                            # For kg2c, extract from description
-                            m_code = re.search(r"kg2c-([\d\.]+-v[\d\.]+)", desc)
-                            if m_code:
-                                code_ver = m_code.group(1)
-                        
-                        # Get biolink_version from response key first, then from description
-                        biolink = node.get("biolink_version")
-                        if not biolink:
-                            m_biolink = re.search(r"Biolink version used was ([0-9\.]+)", desc)
-                            if m_biolink:
-                                biolink = m_biolink.group(1)
-                        
-                        # Extract build date from description for all types
-                        build_dt = None
-                        m_date = re.search(r"done on ([0-9\-:\. ]+)", desc)
-                        if m_date:
-                            build_dt = m_date.group(1)[:10]
-
-                        rows.append(
-                            f"<strong>name:</strong> {name}\n"
-                            f"version: {code_ver or 'unknown'}\n"
-                            f"biolink: {biolink or 'unknown'}\n"
-                            f"build date: {build_dt or 'unknown'}"
-                        )
-
-                    m.code_version = "\n\n".join(rows)
-            except Exception:
-                pass
+        if new_code_version is not None:
+            m.code_version = new_code_version
 
         # first check
         if previous_state is None:

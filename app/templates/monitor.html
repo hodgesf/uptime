@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+
+{% block title %}{{ monitor_url }}{% endblock %}
+{% block heading %}{{ monitor_url }}{% endblock %}
+
+{% block head %}
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block styles %}
+        .container {
+            max-width: 1000px;
+            margin: auto;
+            background: var(--bg-primary);
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .back-link {
+            text-decoration: none;
+            color: var(--link-color);
+            font-weight: 500;
+        }
+
+        .back-link:hover {
+            text-decoration: underline;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .stat-card {
+            background: var(--card-bg);
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid var(--card-border);
+        }
+
+        .stat-card h4 {
+            margin: 0;
+            font-size: 0.75em;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+
+        .stat-card p {
+            margin: 8px 0 0;
+            font-size: 1.2em;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--bg-primary);
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background-color: var(--header-bg);
+            color: var(--header-text);
+            font-weight: 600;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        tr:hover {
+            background-color: var(--table-hover);
+        }
+
+        details {
+            margin-bottom: 15px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px;
+            background: var(--card-bg);
+        }
+
+        summary {
+            font-weight: 600;
+            cursor: pointer;
+            padding: 5px;
+            color: var(--text-primary);
+        }
+
+        summary:hover {
+            opacity: 0.8;
+        }
+{% endblock %}
+
+{% block content %}
+    <div class="container">
+        <a href="/" class="back-link">← Back to Dashboard</a>
+
+        <div class="stats-grid">
+            <div class="stat-card"><h4>Current Status</h4><p class="{{ status_class }}">{{ status_label }}</p></div>
+            <div class="stat-card"><h4>Status Since</h4><p id="stat-duration">{% if not initialized %}Initializing{% else %}{{ time_in_status_str }}{% endif %}</p></div>
+            <div class="stat-card"><h4>Avg Latency</h4><p>{% if not initialized %}Initializing{% else %}{{ avg_lat }}ms{% endif %}</p></div>
+            <div class="stat-card"><h4>24h Uptime</h4><p>{% if not initialized %}Initializing{% else %}{{ uptime_pct }}%{% endif %}</p></div>
+        </div>
+
+        <details>
+            <summary>Status Timeline (Last 24h)</summary>
+            <table>
+                <thead><tr><th>State</th><th>Started At</th><th>Duration</th></tr></thead>
+                <tbody>{{ timeline_html | safe }}</tbody>
+            </table>
+        </details>
+
+        {{ downtime_html | safe }}
+
+        <details>
+            <summary>Latency Graph &amp; Metrics</summary>
+            <div style="padding:15px;">
+                {% if not initialized %}<p style="color: #9ca3af; font-style: italic;">Initializing - awaiting first check...</p>{% else %}<canvas id="latencyChart" height="100"></canvas>{% endif %}
+            </div>
+        </details>
+
+        <details>
+            <summary>Raw Request Logs</summary>
+            <table>
+                <thead><tr><th>Time (PT)</th><th>Code</th></tr></thead>
+                <tbody>{% if not initialized %}<tr><td colspan="2" style="color: #9ca3af; font-style: italic; text-align: center;">Initializing - awaiting first check...</td></tr>{% else %}{{ raw_logs_html | safe }}{% endif %}</tbody>
+            </table>
+        </details>
+    </div>
+{% endblock %}
+
+{% block scripts %}
+    <script>
+        const startTs = {{ start_ts }};
+        function updateDetailTimer() {
+            if (startTs === 0) return;  // Not initialized yet
+            const now = Math.floor(Date.now() / 1000);
+            const s = Math.max(0, now - startTs);
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const sec = s % 60;
+            const str = `${h}h ${m}m ${sec}s`;
+            document.getElementById('stat-duration').textContent = str;
+            const liveDur = document.getElementById('live-duration');
+            if (liveDur) liveDur.textContent = str;
+        }
+        setInterval(updateDetailTimer, 1000);
+
+        // Only initialize chart if data exists
+        const chartCanvas = document.getElementById('latencyChart');
+        if (chartCanvas) {
+            new Chart(chartCanvas, {
+                type: 'line',
+                data: {
+                    labels: {{ chart_labels | tojson }},
+                    datasets: [{ label: 'Latency (ms)', data: {{ chart_data | tojson }}, borderColor: '#6366f1', fill: true, tension: 0.3, pointRadius: 0 }]
+                },
+                options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+            });
+        }
+    </script>
+{% endblock %}
