@@ -1,173 +1,138 @@
 {% extends "base.html" %}
 
 {% block title %}{{ monitor_url }}{% endblock %}
-{% block heading %}{{ monitor_url }}{% endblock %}
+{% block brand %}Endpoint Monitor{% endblock %}
 
 {% block head %}
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 {% endblock %}
 
 {% block styles %}
-        .container {
-            max-width: 1000px;
-            margin: auto;
-            background: var(--bg-primary);
-            padding: 30px;
-            border-radius: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        }
+        .back { font-size: 13px; color: var(--muted); display: inline-block; margin-bottom: 16px; }
+        .back:hover { color: var(--accent); text-decoration: none; }
+        .detail-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
+        .detail-head h1 { font-size: 22px; word-break: break-all; }
 
-        .back-link {
-            text-decoration: none;
-            color: var(--link-color);
-            font-weight: 500;
-        }
+        .hero { padding: 22px 24px; margin-bottom: 16px; }
+        .strip-pct.big { font-size: 26px; }
 
-        .back-link:hover {
-            text-decoration: underline;
-        }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+        .stat { padding: 16px 18px; }
+        .stat h4 { margin: 0; font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; font-family: var(--font-body); }
+        .stat .v { margin-top: 8px; font-family: var(--font-display); font-weight: 600; font-size: 20px; }
+        .stat .v.up { color: var(--up); }
+        .stat .v.down { color: var(--down); }
+        .stat .v.pending { color: var(--muted); }
+        @media (max-width: 680px) { .stats { grid-template-columns: repeat(2, 1fr); } }
 
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 15px;
-            margin-bottom: 25px;
-        }
-
-        .stat-card {
-            background: var(--card-bg);
-            padding: 15px;
-            border-radius: 8px;
-            border-left: 4px solid var(--card-border);
-        }
-
-        .stat-card h4 {
-            margin: 0;
-            font-size: 0.75em;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            font-weight: 600;
-        }
-
-        .stat-card p {
-            margin: 8px 0 0;
-            font-size: 1.2em;
-            font-weight: 600;
-            color: var(--text-primary);
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            background: var(--bg-primary);
-        }
-
-        th, td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid var(--border-color);
-        }
-
-        th {
-            background-color: var(--header-bg);
-            color: var(--header-text);
-            font-weight: 600;
-            font-size: 13px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        tr:hover {
-            background-color: var(--table-hover);
-        }
-
-        details {
-            margin-bottom: 15px;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 10px;
-            background: var(--card-bg);
-        }
-
-        summary {
-            font-weight: 600;
-            cursor: pointer;
-            padding: 5px;
-            color: var(--text-primary);
-        }
-
-        summary:hover {
-            opacity: 0.8;
-        }
+        details.panel { margin-bottom: 12px; padding: 4px 20px; }
+        details.panel summary { font-family: var(--font-display); font-weight: 600; font-size: 14px; cursor: pointer; padding: 13px 0; list-style: none; }
+        details.panel summary::-webkit-details-marker { display: none; }
+        details.panel summary::before { content: '▸'; color: var(--muted); margin-right: 10px; display: inline-block; transition: transform .15s ease; }
+        details.panel[open] summary::before { transform: rotate(90deg); }
+        .panel-body { padding: 4px 0 18px; }
+        table.logs { width: 100%; border-collapse: collapse; }
+        table.logs th, table.logs td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
+        table.logs td { font-variant-numeric: tabular-nums; }
+        table.logs th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+        table.logs tr:last-child td { border-bottom: none; }
 {% endblock %}
 
 {% block content %}
-    <div class="container">
-        <a href="/" class="back-link">← Back to Dashboard</a>
+    <a href="/" class="back">← All endpoints</a>
 
-        <div class="stats-grid">
-            <div class="stat-card"><h4>Current Status</h4><p class="{{ status_class }}">{{ status_label }}</p></div>
-            <div class="stat-card"><h4>Status Since</h4><p id="stat-duration">{% if not initialized %}Initializing{% else %}{{ time_in_status_str }}{% endif %}</p></div>
-            <div class="stat-card"><h4>Avg Latency</h4><p>{% if not initialized %}Initializing{% else %}{{ avg_lat }}ms{% endif %}</p></div>
-            <div class="stat-card"><h4>24h Uptime</h4><p>{% if not initialized %}Initializing{% else %}{{ uptime_pct }}%{% endif %}</p></div>
-        </div>
-
-        <details>
-            <summary>Status Timeline (Last 24h)</summary>
-            <table>
-                <thead><tr><th>State</th><th>Started At</th><th>Duration</th></tr></thead>
-                <tbody>{{ timeline_html | safe }}</tbody>
-            </table>
-        </details>
-
-        {{ downtime_html | safe }}
-
-        <details>
-            <summary>Latency Graph &amp; Metrics</summary>
-            <div style="padding:15px;">
-                {% if not initialized %}<p style="color: #9ca3af; font-style: italic;">Initializing - awaiting first check...</p>{% else %}<canvas id="latencyChart" height="100"></canvas>{% endif %}
-            </div>
-        </details>
-
-        <details>
-            <summary>Raw Request Logs</summary>
-            <table>
-                <thead><tr><th>Time (PT)</th><th>Code</th></tr></thead>
-                <tbody>{% if not initialized %}<tr><td colspan="2" style="color: #9ca3af; font-style: italic; text-align: center;">Initializing - awaiting first check...</td></tr>{% else %}{{ raw_logs_html | safe }}{% endif %}</tbody>
-            </table>
-        </details>
+    <div class="detail-head">
+        <h1>{{ monitor_url }}</h1>
+        <span class="pill {{ status_class }}"><span class="dot"></span>{{ status_label }}</span>
     </div>
+
+    <div class="hero card">
+        <div class="strip-head">
+            <span class="strip-label">Last 30 days</span>
+            <span class="strip-pct big num">{% if uptime_30d is not none %}{{ uptime_30d }}%{% else %}—{% endif %}</span>
+        </div>
+        <div class="bars">
+            {% for d in daily %}
+            <div class="bar {{ d.status }}" title="{{ d.date }} — {% if d.uptime is none %}No data{% else %}{{ d.uptime }}% uptime{% endif %}"></div>
+            {% endfor %}
+        </div>
+        <div class="strip-foot"><span>30 days ago</span><span>Today</span></div>
+    </div>
+
+    <div class="stats">
+        <div class="stat card">
+            <h4>Current status</h4>
+            <div class="v {{ status_class }}">{{ status_label }}</div>
+        </div>
+        <div class="stat card">
+            <h4>{% if not initialized %}Duration{% elif status_class == 'down' %}Down for{% else %}Up for{% endif %}</h4>
+            <div class="v num" id="stat-duration">{% if initialized %}{{ time_in_status_str }}{% else %}—{% endif %}</div>
+        </div>
+        <div class="stat card">
+            <h4>Avg latency · 24h</h4>
+            <div class="v num">{% if initialized %}{{ avg_lat }} ms{% else %}—{% endif %}</div>
+        </div>
+        <div class="stat card">
+            <h4>Uptime · 30d</h4>
+            <div class="v num">{% if uptime_30d is not none %}{{ uptime_30d }}%{% else %}—{% endif %}</div>
+        </div>
+    </div>
+
+    {{ downtime_html | safe }}
+
+    <details class="panel card">
+        <summary>Latency · last 24h</summary>
+        <div class="panel-body">
+            {% if initialized %}<canvas id="latencyChart" height="90"></canvas>{% else %}<p style="color: var(--muted); margin: 4px 0;">Awaiting first check…</p>{% endif %}
+        </div>
+    </details>
+
+    <details class="panel card">
+        <summary>Request log · last 24h</summary>
+        <div class="panel-body">
+            <table class="logs">
+                <thead><tr><th>Time (PT)</th><th>Code</th></tr></thead>
+                <tbody>{% if initialized %}{{ raw_logs_html | safe }}{% else %}<tr><td colspan="2" style="color: var(--muted);">Awaiting first check…</td></tr>{% endif %}</tbody>
+            </table>
+        </div>
+    </details>
 {% endblock %}
 
 {% block scripts %}
-    <script>
-        const startTs = {{ start_ts }};
-        function updateDetailTimer() {
-            if (startTs === 0) return;  // Not initialized yet
-            const now = Math.floor(Date.now() / 1000);
-            const s = Math.max(0, now - startTs);
-            const h = Math.floor(s / 3600);
-            const m = Math.floor((s % 3600) / 60);
-            const sec = s % 60;
-            const str = `${h}h ${m}m ${sec}s`;
-            document.getElementById('stat-duration').textContent = str;
-            const liveDur = document.getElementById('live-duration');
-            if (liveDur) liveDur.textContent = str;
-        }
-        setInterval(updateDetailTimer, 1000);
+<script>
+    const startTs = {{ start_ts }};
+    function updateDuration() {
+        if (!startTs) return;
+        const el = document.getElementById('stat-duration');
+        if (el) el.textContent = formatDuration(Math.floor(Date.now() / 1000) - startTs);
+    }
+    updateDuration();
+    setInterval(updateDuration, 15000);
 
-        // Only initialize chart if data exists
-        const chartCanvas = document.getElementById('latencyChart');
-        if (chartCanvas) {
-            new Chart(chartCanvas, {
-                type: 'line',
-                data: {
-                    labels: {{ chart_labels | tojson }},
-                    datasets: [{ label: 'Latency (ms)', data: {{ chart_data | tojson }}, borderColor: '#6366f1', fill: true, tension: 0.3, pointRadius: 0 }]
-                },
-                options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
-            });
-        }
-    </script>
+    const cv = document.getElementById('latencyChart');
+    if (cv) {
+        const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#6366f1';
+        new Chart(cv, {
+            type: 'line',
+            data: {
+                labels: {{ chart_labels | tojson }},
+                datasets: [{
+                    label: 'Latency (ms)',
+                    data: {{ chart_data | tojson }},
+                    borderColor: accent,
+                    backgroundColor: 'rgba(99,102,241,.12)',
+                    fill: true, tension: .3, pointRadius: 0, borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, grid: { color: 'rgba(128,128,128,.14)' } },
+                    x: { grid: { display: false }, ticks: { maxTicksLimit: 8 } }
+                }
+            }
+        });
+    }
+</script>
 {% endblock %}

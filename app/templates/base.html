@@ -4,144 +4,166 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Endpoint Monitor{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
     {% block head %}{% endblock %}
     <style>
         :root {
-            --bg-primary: #ffffff;
-            --bg-secondary: #f8f9fa;
-            --text-primary: #1a1a1a;
-            --text-secondary: #666666;
-            --border-color: #e0e0e0;
-            --header-bg: #2c3e50;
-            --header-text: #ffffff;
-            --table-hover: #f5f5f5;
-            --up-color: #22c55e;
-            --down-color: #ef4444;
-            --pending-color: #9ca3af;
-            --link-color: #0066cc;
-            --code-bg: #f5f5f5;
-            --code-border: #d0d0d0;
-            --card-bg: #f8f9fa;
-            --card-border: #6366f1;
+            --bg: #f5f6f8;
+            --surface: #ffffff;
+            --surface-2: #eef0f4;
+            --border: #e6e8ee;
+            --text: #14171f;
+            --muted: #6b7280;
+            --up: #2fb968;
+            --down: #ef4d5a;
+            --degraded: #f5a623;
+            --nodata: #e0e3ea;
+            --accent: #6366f1;
+            --up-tint: rgba(47,185,104,.13);
+            --down-tint: rgba(239,77,90,.13);
+            --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.04);
+            --font-display: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+
+            /* legacy aliases so server-rendered fragments keep working */
+            --up-color: var(--up);
+            --down-color: var(--down);
+            --border-color: var(--border);
+            --card-bg: var(--surface);
+            --bg-primary: var(--surface);
+            --bg-secondary: var(--surface-2);
+            --text-primary: var(--text);
+            --text-secondary: var(--muted);
+            --link-color: var(--accent);
+            --pending-color: var(--muted);
+            --code-bg: var(--surface-2);
+            --code-border: var(--border);
         }
 
         [data-theme="dark"] {
-            --bg-primary: #1e1e1e;
-            --bg-secondary: #2d2d2d;
-            --text-primary: #ffffff;
-            --text-secondary: #b0b0b0;
-            --border-color: #404040;
-            --header-bg: #1a2332;
-            --header-text: #ffffff;
-            --table-hover: #2d2d2d;
-            --up-color: #22c55e;
-            --down-color: #ff5252;
-            --pending-color: #9ca3af;
-            --link-color: #4da6ff;
-            --code-bg: #2d2d2d;
-            --code-border: #404040;
-            --card-bg: #2d2d2d;
-            --card-border: #404040;
+            --bg: #0e1013;
+            --surface: #16191f;
+            --surface-2: #1c2028;
+            --border: #262b34;
+            --text: #e7eaf0;
+            --muted: #98a1ad;
+            --up: #35c46a;
+            --down: #ff5c66;
+            --degraded: #f7b13d;
+            --nodata: #2a2f38;
+            --accent: #818cf8;
+            --up-tint: rgba(53,196,106,.16);
+            --down-tint: rgba(255,92,102,.16);
+            --shadow: none;
         }
 
+        * { box-sizing: border-box; }
+        html { -webkit-text-size-adjust: 100%; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            font-family: var(--font-body);
             margin: 0;
-            padding: 20px 40px;
-            background: var(--bg-primary);
-            color: var(--text-primary);
+            background: var(--bg);
+            color: var(--text);
+            -webkit-font-smoothing: antialiased;
+            line-height: 1.45;
         }
+        .wrap { max-width: 920px; margin: 0 auto; padding: 30px 24px 72px; }
+        .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 30px; }
+        .brand { display: flex; align-items: center; gap: 11px; font-family: var(--font-display); font-weight: 600; font-size: 18px; letter-spacing: -.01em; }
+        .brand .glyph { width: 22px; height: 22px; border-radius: 7px; background: linear-gradient(135deg, var(--up), var(--accent)); box-shadow: 0 2px 8px rgba(99,102,241,.35); }
 
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 30px;
-        }
-
-        h2 {
-            margin: 0;
-            font-size: 28px;
-            font-weight: 600;
-        }
+        h1, h2, h3 { font-family: var(--font-display); letter-spacing: -.02em; margin: 0; font-weight: 600; }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
 
         .theme-toggle {
-            background: var(--header-bg);
-            color: var(--header-text);
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-            transition: opacity 0.2s;
+            background: var(--surface); color: var(--text); border: 1px solid var(--border);
+            padding: 7px 13px; border-radius: 9px; cursor: pointer; font-size: 13px; font-weight: 500;
+            font-family: var(--font-body); transition: background .12s ease;
         }
+        .theme-toggle:hover { background: var(--surface-2); }
 
-        .theme-toggle:hover {
-            opacity: 0.8;
-        }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); }
 
-        .up {
-            color: var(--up-color);
-            font-weight: 700;
-            font-size: 14px;
+        /* status pill */
+        .pill {
+            display: inline-flex; align-items: center; gap: 7px; flex: none;
+            font-family: var(--font-display); font-weight: 600; font-size: 11.5px;
+            letter-spacing: .03em; text-transform: uppercase;
+            padding: 4px 11px 4px 9px; border-radius: 999px; white-space: nowrap;
         }
+        .pill .dot { width: 8px; height: 8px; border-radius: 50%; }
+        .pill.up { color: var(--up); background: var(--up-tint); }
+        .pill.down { color: var(--down); background: var(--down-tint); }
+        .pill.pending { color: var(--muted); background: var(--surface-2); }
+        .pill.up .dot { background: var(--up); box-shadow: 0 0 0 3px var(--up-tint); }
+        .pill.down .dot { background: var(--down); box-shadow: 0 0 0 3px var(--down-tint); }
+        .pill.pending .dot { background: var(--muted); }
 
-        .down {
-            color: var(--down-color);
-            font-weight: 700;
-            font-size: 14px;
+        /* 30-day status bar strip */
+        .bars { display: flex; gap: 3px; align-items: stretch; width: 100%; }
+        .bar {
+            flex: 1 1 0; min-width: 0; height: 40px; border-radius: 3px;
+            background: var(--nodata); transition: transform .12s ease, opacity .12s ease;
         }
+        .bar.up { background: var(--up); }
+        .bar.down { background: var(--down); }
+        .bar.degraded { background: var(--degraded); }
+        .bar:hover { transform: scaleY(1.07); opacity: .82; }
+        .bars.mini .bar { height: 24px; border-radius: 2px; }
 
-        .pending {
-            color: var(--pending-color);
-            font-weight: 600;
-            font-style: italic;
-            font-size: 14px;
-        }
-
-        a {
-            color: var(--link-color);
-            text-decoration: none;
-            font-weight: 500;
-        }
-
-        a:hover {
-            text-decoration: underline;
-        }
+        .strip-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 11px; }
+        .strip-label { font-size: 13px; color: var(--muted); font-weight: 500; }
+        .strip-pct { font-family: var(--font-display); font-weight: 600; font-variant-numeric: tabular-nums; }
+        .strip-foot { display: flex; justify-content: space-between; margin-top: 9px; font-size: 11px; color: var(--muted); }
 
         {% block styles %}{% endblock %}
     </style>
 </head>
 <body>
-    <div class="header">
-        <h2>{% block heading %}System Status{% endblock %}</h2>
-        <button class="theme-toggle" onclick="toggleTheme()">🌙 Dark Mode</button>
+    <div class="wrap">
+        <div class="topbar">
+            <div class="brand"><span class="glyph"></span>{% block brand %}Endpoint Monitor{% endblock %}</div>
+            <button class="theme-toggle" onclick="toggleTheme()">🌙 Dark</button>
+        </div>
+        {% block content %}{% endblock %}
     </div>
 
-    {% block content %}{% endblock %}
-
     <script>
+        // Compact, seconds-free duration: highest non-zero unit down through
+        // minutes, capped at 3 units. Mirrors format_duration_str() on the server.
+        function formatDuration(totalSeconds) {
+            totalSeconds = Math.floor(totalSeconds);
+            if (totalSeconds < 0) totalSeconds = 0;
+            const units = [['y', 31536000], ['mo', 2592000], ['d', 86400], ['h', 3600], ['m', 60]];
+            let rem = totalSeconds;
+            const parts = [];
+            for (const [label, size] of units) {
+                const v = Math.floor(rem / size);
+                if (v > 0 || parts.length > 0) { parts.push(v + label); rem -= v * size; }
+                if (parts.length === 3) break;
+            }
+            return parts.length ? parts.join(' ') : '<1m';
+        }
+
         function toggleTheme() {
             const html = document.documentElement;
-            const isDark = html.getAttribute('data-theme') === 'dark';
-            const newTheme = isDark ? 'light' : 'dark';
-            html.setAttribute('data-theme', newTheme);
-            localStorage.setItem('theme', newTheme);
+            const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+            html.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
             updateThemeButton();
         }
-
         function updateThemeButton() {
-            const button = document.querySelector('.theme-toggle');
-            const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-            button.textContent = isDark ? '☀️ Light Mode' : '🌙 Dark Mode';
+            const btn = document.querySelector('.theme-toggle');
+            if (btn) btn.textContent = document.documentElement.getAttribute('data-theme') === 'dark' ? '☀️ Light' : '🌙 Dark';
         }
-
         const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
         document.documentElement.setAttribute('data-theme', savedTheme);
         updateThemeButton();
     </script>
-
     {% block scripts %}{% endblock %}
 </body>
 </html>

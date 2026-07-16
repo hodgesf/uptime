@@ -129,23 +129,88 @@ app.add_middleware(
 )
 
 def format_duration_str(seconds):
-    if seconds < 0: seconds = 0
-    days = seconds // 86400
-    h = (seconds % 86400) // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    
+    """Compact, seconds-free duration: highest non-zero unit down through
+    minutes, capped at 3 units (e.g. '5d 3h 20m', '2h 15m', '1y 2mo 5d')."""
+    seconds = int(seconds)
+    if seconds < 0:
+        seconds = 0
+    units = [("y", 31536000), ("mo", 2592000), ("d", 86400), ("h", 3600), ("m", 60)]
     parts = []
-    if days > 0:
-        parts.append(f"{days}d")
-    if h > 0:
-        parts.append(f"{h}h")
-    if m > 0:
-        parts.append(f"{m}m")
-    if s > 0 or not parts:  # Always show seconds if nothing else
-        parts.append(f"{s}s")
-    
-    return " ".join(parts)
+    rem = seconds
+    for label, size in units:
+        value = rem // size
+        if value > 0 or parts:
+            parts.append(f"{value}{label}")
+            rem -= value * size
+        if len(parts) == 3:
+            break
+    return " ".join(parts) if parts else "<1m"
+
+
+def compute_daily_status(events, now_ts, tz, days=30):
+    """Reconstruct per-day up/down status for the last `days` days from state
+    events. Returns a list (oldest first) of dicts:
+        {date, status: up|down|degraded|nodata, uptime: float|None,
+         down_seconds, up_seconds, total_seconds}
+    """
+    evs = sorted(events, key=lambda e: e.changed_at_ts)
+    monitoring_start = evs[0].changed_at_ts if evs else None
+
+    # Contiguous state intervals [start, end) with a boolean up flag; the last
+    # event runs to now.
+    intervals = []
+    for i, e in enumerate(evs):
+        start = e.changed_at_ts
+        end = evs[i + 1].changed_at_ts if i + 1 < len(evs) else now_ts
+        if end > start:
+            intervals.append((start, end, e.is_up))
+
+    now_local = datetime.fromtimestamp(now_ts, tz)
+    today_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    result = []
+    for d in range(days - 1, -1, -1):
+        day_start_local = today_midnight - timedelta(days=d)
+        day_end_local = day_start_local + timedelta(days=1)
+        day_start = int(day_start_local.timestamp())
+        day_end = int(day_end_local.timestamp())
+        label = day_start_local.strftime("%b %-d")
+
+        eff_end = min(day_end, now_ts)
+        eff_start = day_start if monitoring_start is None else max(day_start, monitoring_start)
+
+        if monitoring_start is None or eff_end <= eff_start:
+            result.append({"date": label, "status": "nodata", "uptime": None,
+                           "down_seconds": 0, "up_seconds": 0, "total_seconds": 0})
+            continue
+
+        total = eff_end - eff_start
+        down = 0
+        for s, e_, up in intervals:
+            if up:
+                continue
+            overlap = min(e_, eff_end) - max(s, eff_start)
+            if overlap > 0:
+                down += overlap
+        up_sec = total - down
+        if down == 0:
+            status = "up"
+        elif up_sec <= 0:
+            status = "down"
+        else:
+            status = "degraded"
+        result.append({"date": label, "status": status,
+                       "uptime": round(up_sec / total * 100, 3),
+                       "down_seconds": int(down), "up_seconds": int(up_sec),
+                       "total_seconds": int(total)})
+    return result
+
+
+def overall_uptime(daily):
+    """Time-weighted uptime percent across the daily buckets, or None."""
+    total = sum(d["total_seconds"] for d in daily)
+    up = sum(d["up_seconds"] for d in daily)
+    return round(up / total * 100, 3) if total > 0 else None
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
@@ -174,6 +239,16 @@ async def monitor_detail(request: Request, monitor_id: int):
             .where(Check.monitor_id == monitor_id, Check.checked_at >= one_day_ago_dt)
             .order_by(Check.checked_at.asc())
         )).scalars().all()
+
+        all_events = (await session.execute(
+            select(StateEvent)
+            .where(StateEvent.monitor_id == monitor_id)
+            .order_by(StateEvent.changed_at_ts.asc())
+        )).scalars().all()
+
+    # 30-day daily uptime for the status-bar strip
+    daily = compute_daily_status(all_events, now_ts, pacific, days=30)
+    uptime_30d = overall_uptime(daily)
 
     # Prep Stats - only calculate if first check has completed
     if monitor.last_state_change_ts is not None:
@@ -204,37 +279,6 @@ async def monitor_detail(request: Request, monitor_id: int):
     # Capture the current status now, before the downtime loop below reuses the
     # `status_label` name for its per-check labels.
     current_status_label, current_status_class = status_label, status_class
-
-    # --- Fixed Timeline Formatting ---
-    timeline_rows = []
-    
-    # Only show current state if it actually exists (state change has occurred)
-    if monitor.last_state_change_ts is not None and monitor.is_up is not None:
-        current_start_dt = datetime.fromtimestamp(monitor.last_state_change_ts, tz=pacific).strftime('%m/%d %I:%M:%S %p %Z')
-        timeline_rows.append(f"""
-            <tr>
-                <td class='{status_class}'>{status_label} (Current)</td>
-                <td>{current_start_dt}</td>
-                <td id="live-duration">{time_in_status_str}</td>
-            </tr>
-        """)
-        
-        next_ts = monitor.last_state_change_ts
-        # Show all state events in reverse chronological order
-        for e in events:
-            if e.changed_at_ts == monitor.last_state_change_ts:
-                continue  # Skip duplicate of current state
-                
-            duration_sec = next_ts - e.changed_at_ts
-            s_class = "up" if e.is_up else "down"
-            label = "UP" if e.is_up else "DOWN"
-            start_time = datetime.fromtimestamp(e.changed_at_ts, tz=pacific).strftime('%m/%d %I:%M:%S %p %Z')
-            
-            timeline_rows.append(f"<tr><td class='{s_class}'>{label}</td><td>{start_time}</td><td>{format_duration_str(duration_sec)}</td></tr>")
-            next_ts = e.changed_at_ts
-    else:
-        # No state change has occurred yet - still initializing
-        timeline_rows = [f"<tr><td class='pending'>INITIALIZING</td><td>Awaiting first check...</td><td id=\"live-duration\">Pending</td></tr>"]
 
     # FIX: Ensure Pacific conversion for Raw Logs - only if initialized
     raw_logs_list = []
@@ -380,7 +424,8 @@ async def monitor_detail(request: Request, monitor_id: int):
             "time_in_status_str": time_in_status_str,
             "avg_lat": avg_lat,
             "uptime_pct": uptime_pct,
-            "timeline_html": "".join(timeline_rows),
+            "daily": daily,
+            "uptime_30d": uptime_30d,
             "downtime_html": downtime_section_html,
             "raw_logs_html": raw_logs,
             "chart_labels": chart_labels,
@@ -393,23 +438,35 @@ async def monitor_detail(request: Request, monitor_id: int):
 @app.get("/status")
 async def status():
     pacific = ZoneInfo("America/Los_Angeles")
+    now_ts = int(time.time())
     async with AsyncSessionLocal() as session:
         monitors = (await session.execute(select(Monitor))).scalars().all()
-        result = []
-        for m in monitors:
-            if m.last_state_change_ts is not None:
-                change_str = datetime.fromtimestamp(m.last_state_change_ts, tz=pacific).strftime("%m/%d %I:%M %p %Z")
-            else:
-                change_str = "Pending"
-            result.append({
-                "id": m.id,
-                "url": m.url,
-                "is_up": m.is_up,
-                "last_state_change_ts": m.last_state_change_ts or 0,
-                "last_state_change_str": change_str,
-                "code_version": m.code_version
-            })
-        return result
+        all_events = (await session.execute(
+            select(StateEvent).order_by(StateEvent.changed_at_ts.asc())
+        )).scalars().all()
+
+    events_by_monitor: dict[int, list] = {}
+    for e in all_events:
+        events_by_monitor.setdefault(e.monitor_id, []).append(e)
+
+    result = []
+    for m in monitors:
+        if m.last_state_change_ts is not None:
+            change_str = datetime.fromtimestamp(m.last_state_change_ts, tz=pacific).strftime("%b %-d, %-I:%M %p %Z")
+        else:
+            change_str = "Pending"
+        daily = compute_daily_status(events_by_monitor.get(m.id, []), now_ts, pacific, days=30)
+        result.append({
+            "id": m.id,
+            "url": m.url,
+            "is_up": m.is_up,
+            "last_state_change_ts": m.last_state_change_ts or 0,
+            "last_state_change_str": change_str,
+            "code_version": m.code_version,
+            "uptime_30d": overall_uptime(daily),
+            "daily": [{"date": d["date"], "status": d["status"], "uptime": d["uptime"]} for d in daily],
+        })
+    return result
 
 @app.get("/api/monitor/{monitor_id}")
 async def api_monitor_detail(monitor_id: int):

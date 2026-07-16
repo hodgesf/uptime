@@ -1,215 +1,147 @@
 {% extends "base.html" %}
 
-{% block title %}Endpoint Monitor{% endblock %}
-{% block heading %}System Status{% endblock %}
+{% block title %}System Status{% endblock %}
+{% block brand %}System Status{% endblock %}
 
 {% block styles %}
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            background: var(--bg-primary);
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        }
+        .overview { display: flex; align-items: center; gap: 17px; padding: 20px 22px; margin-bottom: 22px; }
+        .ov-dot { width: 44px; height: 44px; border-radius: 50%; flex: none; position: relative; }
+        .ov-dot::after { content: ''; position: absolute; inset: 13px; border-radius: 50%; }
+        .overview.up .ov-dot { background: var(--up-tint); }
+        .overview.up .ov-dot::after { background: var(--up); }
+        .overview.down .ov-dot { background: var(--down-tint); }
+        .overview.down .ov-dot::after { background: var(--down); }
+        .overview.pending .ov-dot { background: var(--surface-2); }
+        .overview.pending .ov-dot::after { background: var(--muted); }
+        .ov-title { font-family: var(--font-display); font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
+        .ov-sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
 
-        th, td {
-            padding: 16px;
-            text-align: left;
-            border-bottom: 1px solid var(--border-color);
-        }
-
-        th {
-            background-color: var(--header-bg);
-            color: var(--header-text);
-            font-weight: 600;
-            font-size: 13px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        tr:hover {
-            background-color: var(--table-hover);
-        }
-
-        .endpoint-link {
-            color: var(--link-color);
-            font-size: 0.9em;
-            font-weight: 500;
-        }
-
-        .code-version-container {
-            display: flex;
-            flex-direction: column;
-        }
-
-        .code-version-summary {
-            font-weight: 500;
-            color: var(--text-primary);
-            font-size: 14px;
-        }
-
-        .code-version-link {
-            color: var(--link-color);
-            font-size: 0.8em;
-            text-decoration: none;
-            cursor: pointer;
-            margin-top: 4px;
-            display: inline-block;
-            font-weight: 500;
-        }
-
-        .code-version-link:hover {
-            text-decoration: underline;
-        }
-
-        .code-version-details {
-            max-width: 450px;
-            max-height: 0;
-            overflow: hidden;
-            white-space: pre-wrap;
-            font-size: 13px;
-            padding: 0px 8px;
-            border: none;
-            background: var(--code-bg);
-            margin-top: 0px;
-            border-radius: 4px;
-            transition: max-height 0.3s ease, padding 0.3s ease, border 0.3s ease, margin-top 0.3s ease;
-            color: var(--text-primary);
-        }
-
-        .code-version-details.expanded {
-            max-height: 120px;
-            overflow-y: auto;
-            padding: 8px;
-            border: 1px solid var(--code-border);
-            margin-top: 8px;
-        }
+        .monitor-card { padding: 18px 20px; margin-bottom: 12px; }
+        .m-top { display: flex; align-items: center; gap: 12px; }
+        .m-name { font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+        .m-name a { color: var(--text); }
+        .m-name a:hover { color: var(--accent); text-decoration: none; }
+        .m-spacer { flex: 1 1 auto; }
+        .m-uptime { font-family: var(--font-display); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--muted); flex: none; }
+        .m-bars { margin-top: 15px; }
+        .m-meta { margin-top: 11px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; font-size: 12px; color: var(--muted); }
+        .m-meta .sep { opacity: .45; }
+        .m-meta .visit { margin-left: auto; }
+        @media (max-width: 560px) { .m-name { max-width: 175px; } }
 {% endblock %}
 
 {% block content %}
-    <table>
-        <thead>
-            <tr>
-                <th>Endpoint</th>
-                <th>Status</th>
-                <th>Status Since</th>
-                <th>Duration</th>
-                <th>Code Version</th>
-                <th></th>
-            </tr>
-        </thead>
-        <tbody id="monitor-body"></tbody>
-    </table>
+    <div class="overview card pending" id="overview">
+        <div class="ov-dot"></div>
+        <div>
+            <div class="ov-title" id="ov-title">Checking endpoints…</div>
+            <div class="ov-sub" id="ov-sub">Loading status</div>
+        </div>
+    </div>
+    <div id="monitors"></div>
 {% endblock %}
 
 {% block scripts %}
-    <script>
-        let rowRefs = {};
+<script>
+    const rows = {};
 
-        async function loadStatus() {
-            try {
-                const res = await fetch("/status");
-                const data = await res.json();
-                const tbody = document.getElementById("monitor-body");
-                data.forEach(m => {
-                    if (!rowRefs[m.url]) {
-                        const row = document.createElement("tr");
-                        row.innerHTML = `
-                            <td><a href="/monitor/${m.id}">${m.url}</a></td>
-                            <td class="status-cell"></td>
-                            <td class="status-since"></td>
-                            <td class="state-time"></td>
-                            <td>
-                                <div class="code-version-container">
-                                    <div class="code-version-summary"></div>
-                                    <a class="code-version-link">show more</a>
-                                    <div class="code-version-details"></div>
-                                </div>
-                            </td>
-                            <td><a href="${m.url}" target="_blank" rel="noopener noreferrer" class="endpoint-link">visit endpoint</a></td>
-                        `;
-                        tbody.appendChild(row);
-                        rowRefs[m.url] = {
-                            statusCell: row.querySelector(".status-cell"),
-                            sinceCell: row.querySelector(".status-since"),
-                            timeCell: row.querySelector(".state-time"),
-                            codeSummary: row.querySelector(".code-version-summary"),
-                            codeDetails: row.querySelector(".code-version-details"),
-                            codeLink: row.querySelector(".code-version-link"),
-                            codeContainer: row.querySelector(".code-version-container"),
-                            ts: m.last_state_change_ts
-                        };
-                    }
+    function barsHtml(daily) {
+        if (!daily || !daily.length) return '';
+        return daily.map(d => {
+            const label = d.uptime === null ? 'No data' : d.uptime + '% uptime';
+            return `<div class="bar ${d.status}" title="${d.date} — ${label}"></div>`;
+        }).join('');
+    }
 
-                    const ref = rowRefs[m.url];
+    function renderSince(el) {
+        const ts = parseInt(el.dataset.ts || '0', 10);
+        if (!ts) { el.textContent = 'Awaiting first check'; return; }
+        const verb = el.dataset.verb ? el.dataset.verb + ' ' : '';
+        el.textContent = verb + formatDuration(Math.floor(Date.now() / 1000) - ts);
+    }
 
-                    if (m.is_up === null) {
-                        ref.statusCell.textContent = 'CHECKING...';
-                        ref.statusCell.className = 'pending';
-                    } else {
-                        ref.statusCell.textContent = m.is_up ? 'UP' : 'DOWN';
-                        ref.statusCell.className = m.is_up ? 'up' : 'down';
-                    }
-                    ref.sinceCell.textContent = m.last_state_change_str;
-                    ref.ts = m.last_state_change_ts;
+    async function load() {
+        let data;
+        try { data = await (await fetch('/status')).json(); }
+        catch (e) { console.error(e); return; }
 
-                    // Extract build date from code_version (look for "done on" followed by date)
-                    const codeVersionText = m.code_version || "—";
-                    let buildDate = "Unknown";
-                    const dateMatch = codeVersionText.match(/done on\s+(\d{4}-\d{2}-\d{2})/);
-                    if (dateMatch) {
-                        buildDate = dateMatch[1];
-                    } else {
-                        // Fallback: look for any date pattern in YYYY-MM-DD format
-                        const anyDateMatch = codeVersionText.match(/(\d{4}-\d{2}-\d{2})/);
-                        if (anyDateMatch) {
-                            buildDate = anyDateMatch[1];
-                        }
-                    }
+        const container = document.getElementById('monitors');
+        let upCount = 0, anyPending = false;
+        const total = data.length;
 
-                    ref.codeSummary.textContent = buildDate;
-                    ref.codeDetails.innerHTML = codeVersionText;
+        data.forEach(m => {
+            if (m.is_up === true) upCount++;
+            if (m.is_up === null) anyPending = true;
 
-                    // Add click handler for toggle (only once)
-                    if (!ref.codeLink.hasClickHandler) {
-                        ref.codeLink.addEventListener('click', (e) => {
-                            e.preventDefault();
-                            ref.codeDetails.classList.toggle('expanded');
-                            ref.codeLink.textContent = ref.codeDetails.classList.contains('expanded') ? 'show less' : 'show more';
-                        });
-                        ref.codeLink.hasClickHandler = true;
-                    }
-                });
-            } catch (e) { console.error(e); }
+            let el = rows[m.id];
+            if (!el) {
+                el = document.createElement('div');
+                el.className = 'monitor-card card';
+                el.innerHTML = `
+                    <div class="m-top">
+                        <span class="pill pending" data-pill><span class="dot"></span><span data-status>…</span></span>
+                        <span class="m-name"><a href="/monitor/${m.id}"></a></span>
+                        <span class="m-spacer"></span>
+                        <span class="m-uptime num" data-uptime></span>
+                    </div>
+                    <div class="m-bars bars mini" data-bars></div>
+                    <div class="m-meta">
+                        <span data-since></span>
+                        <span data-build></span>
+                        <a class="visit" target="_blank" rel="noopener noreferrer" data-visit>visit ↗</a>
+                    </div>`;
+                container.appendChild(el);
+                rows[m.id] = el;
+                el.querySelector('.m-name a').textContent = m.url;
+                el.querySelector('[data-visit]').href = m.url;
+            }
+
+            const pill = el.querySelector('[data-pill]');
+            const statusText = el.querySelector('[data-status]');
+            const since = el.querySelector('[data-since]');
+            if (m.is_up === null) { pill.className = 'pill pending'; statusText.textContent = 'Checking'; since.dataset.verb = ''; }
+            else if (m.is_up) { pill.className = 'pill up'; statusText.textContent = 'Up'; since.dataset.verb = 'up'; }
+            else { pill.className = 'pill down'; statusText.textContent = 'Down'; since.dataset.verb = 'down'; }
+
+            el.querySelector('[data-uptime]').textContent = (m.uptime_30d === null || m.uptime_30d === undefined) ? '—' : m.uptime_30d + '%';
+            el.querySelector('[data-bars]').innerHTML = barsHtml(m.daily);
+
+            since.dataset.ts = m.last_state_change_ts || 0;
+            renderSince(since);
+
+            const build = el.querySelector('[data-build]');
+            let bd = '';
+            if (m.code_version) {
+                const mm = m.code_version.match(/(\d{4}-\d{2}-\d{2})/);
+                if (mm) bd = 'build ' + mm[1];
+                build.title = m.code_version;
+            }
+            build.innerHTML = bd ? `<span class="sep">·</span> ${bd}` : '';
+        });
+
+        const ov = document.getElementById('overview');
+        const title = document.getElementById('ov-title');
+        const sub = document.getElementById('ov-sub');
+        if (anyPending && upCount < total) {
+            ov.className = 'overview card pending';
+            title.textContent = 'Checking endpoints…';
+            sub.textContent = `${upCount} of ${total} endpoints up`;
+        } else if (upCount === total && total > 0) {
+            ov.className = 'overview card up';
+            title.textContent = 'All Systems Operational';
+            sub.textContent = `${total} of ${total} endpoints up`;
+        } else {
+            ov.className = 'overview card down';
+            const down = total - upCount;
+            title.textContent = `${down} Endpoint${down === 1 ? '' : 's'} Down`;
+            sub.textContent = `${upCount} of ${total} endpoints up`;
         }
+    }
 
-        function updateTimers() {
-            const now = Math.floor(Date.now() / 1000);
-            Object.values(rowRefs).forEach(ref => {
-                if (ref.ts === 0) {
-                    ref.timeCell.textContent = 'Pending';
-                } else {
-                    const s = Math.max(0, now - ref.ts);
-                    const h = Math.floor(s / 3600);
+    function tick() { document.querySelectorAll('[data-since]').forEach(renderSince); }
 
-                    if (h >= 24) {
-                        const d = Math.floor(h / 24);
-                        const remainingH = h % 24;
-                        const m = Math.floor((s % 3600) / 60);
-                        const sec = s % 60;
-                        ref.timeCell.textContent = `${d}d ${remainingH}h ${m}m ${sec}s`;
-                    } else {
-                        const m = Math.floor((s % 3600) / 60);
-                        const sec = s % 60;
-                        ref.timeCell.textContent = `${h}h ${m}m ${sec}s`;
-                    }
-                }
-            });
-        }
-
-        loadStatus();
-        setInterval(loadStatus, 5000);
-        setInterval(updateTimers, 1000);
-    </script>
+    load();
+    setInterval(load, 5000);
+    setInterval(tick, 15000);
+</script>
 {% endblock %}
