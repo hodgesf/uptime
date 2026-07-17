@@ -594,6 +594,10 @@ async def status():
             "uptime_24h": overall_uptime(hourly),
             "bars": [{"date": d["date"], "status": d["status"], "uptime": d["uptime"]} for d in hourly],
         })
+
+    # Display in ENDPOINTS order regardless of DB insertion order (unknown URLs last).
+    order = {u: i for i, u in enumerate(ENDPOINTS)}
+    result.sort(key=lambda r: order.get(r["url"], len(order)))
     return result
 
 @app.get("/api/monitor/{monitor_id}")
