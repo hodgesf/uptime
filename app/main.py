@@ -18,18 +18,18 @@ from .models import Monitor, Check, StateEvent
 # --- Configuration ---
 CHECK_INTERVAL = 30
 ENDPOINTS = [
+    "https://arax.ncats.io",
+    "https://arax.ci.transltr.io",
+    "https://arax.ncats.io/test",
+    "https://arax.ncats.io/shepherd",
+    "https://arax.ncats.io/beta",
+    "https://arax.ncats.io/legacy",
+    "https://arax.ncats.io/devED",
+    "https://arax.ncats.io/devLM",
     "https://kg2cploverdb.ci.transltr.io",
     "https://kg2cploverdb.test.transltr.io",
     "https://multiomics.rtx.ai:9990",
     "https://multiomics.ci.transltr.io",
-    "https://arax.ncats.io",
-    "https://arax.ncats.io/test",
-    "https://arax.ncats.io/beta",
-    "https://arax.ci.transltr.io",
-    "https://arax.ncats.io/shepherd",
-    "https://arax.ncats.io/devED",
-    "https://arax.ncats.io/devLM",
-    "https://arax.ncats.io/legacy",
 ]
 
 # ARAX endpoints report their build via the ARAX status API rather than a
