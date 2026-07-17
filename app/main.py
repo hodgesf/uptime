@@ -16,10 +16,12 @@ from .database import Base, engine, AsyncSessionLocal
 from .models import Monitor, Check, StateEvent
 
 # --- Configuration ---
-CHECK_INTERVAL = 30
+CHECK_INTERVAL = 60  # seconds between checks (liveness poll cadence)
 ENDPOINTS = [
-    "https://arax.ncats.io",
     "https://arax.ci.transltr.io",
+    "https://arax.test.transltr.io",
+    "https://arax.transltr.io",
+    "https://arax.ncats.io",
     "https://arax.ncats.io/test",
     "https://arax.ncats.io/shepherd",
     "https://arax.ncats.io/beta",
@@ -32,16 +34,48 @@ ENDPOINTS = [
     "https://multiomics.ci.transltr.io",
 ]
 
-# ARAX endpoints report their build via the ARAX status API rather than a
-# /code_version route: append the suffix to the monitored URL. The reported
-# version is the `tier0-YYYYMMDD` token from curie_to_pmids_version.
+# ARAX endpoints are monitored via the ARAX status API rather than a plain root
+# GET: hitting the status route proves the Flask backend is alive (a root GET
+# only proves the static frontend / reverse proxy is up). The same response
+# yields the build version (the `tier0-YYYYMMDD` token from curie_to_pmids_version).
 ARAX_ENDPOINTS = {
+    "https://arax.ci.transltr.io",
+    "https://arax.test.transltr.io",
+    "https://arax.transltr.io",
     "https://arax.ncats.io",
     "https://arax.ncats.io/test",
+    "https://arax.ncats.io/shepherd",
     "https://arax.ncats.io/beta",
-    "https://arax.ci.transltr.io",
+    "https://arax.ncats.io/legacy",
+    "https://arax.ncats.io/devED",
+    "https://arax.ncats.io/devLM",
 }
 ARAX_STATUS_SUFFIX = "/api/arax/v1.4/status?mode=site_config"
+ARAX_QUERY_SUFFIX = "/api/arax/v1.4/query"
+
+# Latency for ARAX nodes is measured by firing a real TRAPI reasoning query at
+# most once per QUERY_INTERVAL. It exercises the backend end-to-end but is slow,
+# so it gets its own generous timeout and NEVER affects up/down — only latency.
+QUERY_INTERVAL = 300  # seconds between /query latency probes per monitor
+ARAX_QUERY_TIMEOUT = 60.0  # seconds; a reasoning query can take a while
+ARAX_QUERY_BODY = {
+    "message": {
+        "query_graph": {
+            "edges": {
+                "e00": {
+                    "subject": "n00",
+                    "object": "n01",
+                    "predicates": ["biolink:interacts_with"],
+                }
+            },
+            "nodes": {
+                "n00": {"ids": ["CHEBI:46195"]},
+                "n01": {"categories": ["biolink:Protein"]},
+            },
+        }
+    }
+}
+_last_query_probe: dict[int, float] = {}
 
 import os
 import re
@@ -366,13 +400,17 @@ async def monitor_detail(request: Request, monitor_id: int):
     daily = compute_daily_status(all_events, now_ts, pacific, days=30)
 
     # Latency stats (24h) from raw checks; downsample the chart to 5-min buckets.
-    latencies = [c.response_time_ms for c in checks]
+    # Only checks that timed a request carry a latency sample (ARAX nodes sample
+    # via the /query probe every QUERY_INTERVAL), so skip rows with no sample.
+    latencies = [c.response_time_ms for c in checks if c.response_time_ms is not None]
     avg_lat = round(sum(latencies) / len(latencies), 1) if latencies else 0
     p95_lat = round(percentile(latencies, 0.95)) if latencies else 0
 
     LAT_BUCKET = 300  # seconds per chart point
     bins: dict[int, list] = {}
     for c in checks:
+        if c.response_time_ms is None:
+            continue
         dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
         ts = int(dt.timestamp())
         bins.setdefault(ts - (ts % LAT_BUCKET), []).append(c.response_time_ms)
@@ -629,7 +667,7 @@ async def api_monitor_detail(monitor_id: int):
         time_in_status_sec = now_ts - monitor.last_state_change_ts
         time_in_status_str = format_duration_str(time_in_status_sec)
         
-        chart_data = [c.response_time_ms for c in checks]
+        chart_data = [c.response_time_ms for c in checks if c.response_time_ms is not None]
         avg_lat = round(sum(chart_data) / len(chart_data), 2) if chart_data else 0
         
         up_checks = [c for c in checks if c.status_code == 200]
@@ -781,29 +819,75 @@ async def fetch_code_version(url: str) -> str | None:
         return None
 
 
-async def run_check(monitor_id: int, url: str):
+async def probe_arax_query_latency(url: str) -> int | None:
+    """Fire the canned TRAPI reasoning query at an ARAX node and return the
+    round-trip time in ms, or None if the query errored/timed out. This runs the
+    real reasoner end-to-end purely to measure latency — it never influences the
+    node's up/down verdict."""
     start = time.perf_counter()
+    try:
+        r = await http_client.post(
+            url + ARAX_QUERY_SUFFIX,
+            json=ARAX_QUERY_BODY,
+            timeout=ARAX_QUERY_TIMEOUT,
+        )
+        if r.status_code != 200:
+            return None
+        return int((time.perf_counter() - start) * 1000)
+    except Exception:
+        return None
+
+
+async def run_check(monitor_id: int, url: str):
+    is_arax = url in ARAX_ENDPOINTS
     code = 0
     error_message = None
+    new_code_version = None
+    # Latency sample for this check (ms). None means "no sample this check" — the
+    # column is nullable and downstream latency stats skip None rows.
+    dur = None
 
-    try:
-        r = await http_client.get(url, follow_redirects=True, timeout=10.0)
-        code = r.status_code
-    except Exception as ex:
-        error_message = repr(ex)
+    if is_arax:
+        # Liveness via the ARAX status API: a 200 proves the Flask backend is up
+        # (not just the static frontend). The same payload carries the version.
+        try:
+            r = await http_client.get(
+                url + ARAX_STATUS_SUFFIX, follow_redirects=True, timeout=10.0
+            )
+            code = r.status_code
+            if code == 200:
+                new_code_version = parse_arax_version(r.json())
+        except Exception as ex:
+            error_message = repr(ex)
+    else:
+        # Non-ARAX nodes: plain root GET, timed for latency every check.
+        start = time.perf_counter()
+        try:
+            r = await http_client.get(url, follow_redirects=True, timeout=10.0)
+            code = r.status_code
+        except Exception as ex:
+            error_message = repr(ex)
+        dur = int((time.perf_counter() - start) * 1000)
 
-    dur = int((time.perf_counter() - start) * 1000)
     is_success = code == 200
 
-    # Refresh build metadata outside the DB session, and at most once per
-    # CODE_VERSION_REFRESH seconds per monitor, so we never hold a write
-    # transaction open across a network call or re-fetch identical data.
-    new_code_version = None
+    # Refresh metadata / latency outside the DB session so we never hold a write
+    # transaction open across a network call.
     if is_success:
         now_mono = time.monotonic()
-        if now_mono - _last_code_version_fetch.get(monitor_id, 0.0) >= CODE_VERSION_REFRESH:
-            new_code_version = await fetch_code_version(url)
-            _last_code_version_fetch[monitor_id] = now_mono
+
+        if is_arax:
+            # Measure latency from a real /query, at most once per QUERY_INTERVAL.
+            # Throttle is stamped before awaiting so a slow reasoner isn't hit
+            # every poll; the query result never affects up/down.
+            if now_mono - _last_query_probe.get(monitor_id, 0.0) >= QUERY_INTERVAL:
+                _last_query_probe[monitor_id] = now_mono
+                dur = await probe_arax_query_latency(url)
+        else:
+            # Non-ARAX build metadata via /code_version, throttled per monitor.
+            if now_mono - _last_code_version_fetch.get(monitor_id, 0.0) >= CODE_VERSION_REFRESH:
+                new_code_version = await fetch_code_version(url)
+                _last_code_version_fetch[monitor_id] = now_mono
 
         # Refresh TLS cert expiry (cached in memory), throttled per monitor.
         if now_mono - _last_cert_fetch.get(monitor_id, 0.0) >= CERT_REFRESH:

@@ -26,7 +26,10 @@ class Check(Base):
     id = Column(Integer, primary_key=True, index=True)
     monitor_id = Column(Integer, ForeignKey("monitors.id"))
     status_code = Column(Integer)
-    response_time_ms = Column(Integer)
+    # Nullable: a latency sample is only recorded on checks that actually timed a
+    # request. ARAX nodes measure latency via a separate /query probe fired every
+    # QUERY_INTERVAL, so their between-probe status polls carry no latency sample.
+    response_time_ms = Column(Integer, nullable=True)
     checked_at = Column(DateTime(timezone=True), server_default=func.now())
     error_message = Column(String, nullable=True)
     code_version = Column(String, nullable=True)
