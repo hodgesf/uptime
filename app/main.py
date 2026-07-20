@@ -90,6 +90,15 @@ TLS_VERIFY = os.getenv("TLS_VERIFY", "true").strip().lower() not in ("0", "false
 http_client = httpx.AsyncClient(timeout=10, verify=TLS_VERIFY)
 
 SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL")
+SLACK_WEBHOOK_ARAX = os.getenv("SLACK_WEBHOOK_URL_ARAX")
+
+# Alerts for these hosts are additionally mirrored to the dedicated ARAX Slack
+# channel (they still post to the default channel too).
+ARAX_ALERT_HOSTS = {
+    "arax.ci.transltr.io",
+    "arax.test.transltr.io",
+    "arax.transltr.io",
+}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -138,13 +147,22 @@ def parse_build_metadata(description: str):
 
     return build_dt, biolink, dataset_version
 
-async def send_slack_message(text: str):
-    if not SLACK_WEBHOOK:
+async def post_to_webhook(webhook: str | None, text: str):
+    if not webhook:
         return
     try:
-        await http_client.post(SLACK_WEBHOOK, json={"text": text})
+        await http_client.post(webhook, json={"text": text})
     except Exception:
         pass
+
+async def send_slack_message(text: str, url: str | None = None):
+    # The default channel always gets the alert.
+    await post_to_webhook(SLACK_WEBHOOK, text)
+    # ARAX hosts are additionally mirrored to the dedicated ARAX channel.
+    if url is not None:
+        host = (urlparse(url).hostname or "").lower()
+        if host in ARAX_ALERT_HOSTS:
+            await post_to_webhook(SLACK_WEBHOOK_ARAX, text)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -945,7 +963,7 @@ async def run_check(monitor_id: int, url: str):
                 is_up=False,
                 changed_at_ts=m.last_state_change_ts
             ))
-            await send_slack_message(f"{url} is DOWN")
+            await send_slack_message(f"{url} is DOWN", url)
 
         # transition to UP immediately on success
         elif not previous_state and confirmed_up:
@@ -956,7 +974,7 @@ async def run_check(monitor_id: int, url: str):
                 is_up=True,
                 changed_at_ts=m.last_state_change_ts
             ))
-            await send_slack_message(f"{url} is BACK UP")
+            await send_slack_message(f"{url} is BACK UP", url)
 
         session.add(Check(
             monitor_id=monitor_id,
