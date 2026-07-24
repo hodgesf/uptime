@@ -56,9 +56,12 @@ ARAX_QUERY_SUFFIX = "/api/arax/v1.4/query"
 # Latency for ARAX nodes is measured by firing a real TRAPI reasoning query at
 # most once per QUERY_INTERVAL. It exercises the backend end-to-end but is slow,
 # so it gets its own generous timeout and NEVER affects up/down — only latency.
-QUERY_INTERVAL = 300  # seconds between /query latency probes per monitor
+QUERY_INTERVAL = 3600  # seconds between /query latency probes per monitor (1/hour)
 ARAX_QUERY_TIMEOUT = 60.0  # seconds; a reasoning query can take a while
+# `submitter` identifies these probe queries in ARAX's logs so they can be told
+# apart from real user traffic.
 ARAX_QUERY_BODY = {
+    "submitter": "UpTimeARAX",
     "message": {
         "query_graph": {
             "edges": {
