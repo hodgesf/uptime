@@ -57,7 +57,7 @@
         return daily.map(d => {
             let label = d.uptime === null ? 'No data' : d.uptime + '% uptime';
             if (d.degraded_seconds) label += ` · degraded ${Math.round(d.degraded_seconds / 60)}m`;
-            return `<div class="bar ${d.status}" title="${d.date} — ${label}"></div>`;
+            return `<div class="bar ${d.status}" data-date="${d.date}" data-detail="${label}"></div>`;
         }).join('');
     }
 

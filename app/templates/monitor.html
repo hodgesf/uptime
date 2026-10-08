@@ -12,6 +12,11 @@
         .back:hover { color: var(--accent); text-decoration: none; }
         .detail-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
         .detail-head h1 { font-size: 22px; word-break: break-all; }
+        .visit-btn {
+            display: inline-flex; align-items: center; gap: 4px; padding: 5px 12px; border-radius: 999px;
+            font-size: 13px; font-weight: 600; color: var(--accent); border: 1px solid var(--border); background: var(--surface);
+        }
+        .visit-btn:hover { border-color: var(--accent); text-decoration: none; }
 
         .hero { padding: 22px 24px; margin-bottom: 16px; }
         .strip-pct.big { font-size: 26px; }
@@ -61,6 +66,7 @@
     <div class="detail-head">
         <h1>{{ monitor_url }}</h1>
         <span class="pill {{ status_class }}"><span class="dot"></span>{{ status_label }}</span>
+        <a class="visit-btn" href="{{ monitor_url }}" target="_blank" rel="noopener noreferrer">Visit ↗</a>
     </div>
 
     <div class="hero card">
@@ -71,7 +77,7 @@
         <div class="strip">
             <div class="bars">
                 {% for d in daily %}
-                <div class="bar {{ d.status }}" title="{{ d.date }} — {% if d.uptime is none %}No data{% else %}{{ d.uptime }}% uptime{% if d.degraded_seconds %} · degraded {{ (d.degraded_seconds / 60) | round | int }}m{% endif %}{% endif %}"></div>
+                <div class="bar {{ d.status }}" data-date="{{ d.date }}" data-detail="{% if d.uptime is none %}No data{% else %}{{ d.uptime }}% uptime{% if d.degraded_seconds %} · degraded {{ (d.degraded_seconds / 60) | round | int }}m{% endif %}{% endif %}"></div>
                 {% endfor %}
             </div>
             <div class="strip-foot"><span>30 days ago</span><span>Today</span></div>

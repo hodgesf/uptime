@@ -47,6 +47,12 @@ ARAX_ENDPOINTS = {
     "https://arax.ncats.io/devLM",
 }
 ARAX_STATUS_SUFFIX = "/api/arax/v1.4/status?mode=site_config"
+# ARAX nodes whose status API is broken (returns 500 while the site and its
+# queries work): liveness falls back to a plain root GET. Their build version is
+# still tried via the status API, throttled, so it reappears once that's fixed.
+ROOT_LIVENESS_ENDPOINTS = {
+    "https://arax.transltr.io",
+}
 ARAX_QUERY_SUFFIX = "/api/arax/v1.4/query"
 
 # Once per QUERY_INTERVAL each ARAX node gets real TRAPI reasoning queries that
@@ -356,7 +362,7 @@ def _bucket_boundaries(now_ts, tz, count, unit):
     else:  # day
         anchor = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
         step = timedelta(days=1)
-        fmt = "%b %-d"
+        fmt = "%a, %b %-d"
     out = []
     for i in range(count - 1, -1, -1):
         start_local = anchor - i * step
@@ -1166,7 +1172,8 @@ async def maybe_alert(monitor_id: int):
             cause = last_check.error_message.split("(", 1)[0]  # e.g. ConnectTimeout
         else:
             cause = "no response"
-        text = f"{url} DOWN: status check failing ({cause})"
+        check = "site check" if url in ROOT_LIVENESS_ENDPOINTS else "status check"
+        text = f"{url} DOWN: {check} failing ({cause})"
     else:
         text = f"{url} DOWN: all queries failing — {failing_desc}"
     await send_slack_message(text, url)
@@ -1256,7 +1263,15 @@ async def run_check(monitor_id: int, url: str):
     # column is nullable and downstream latency stats skip None rows.
     dur = None
 
-    if is_arax:
+    if url in ROOT_LIVENESS_ENDPOINTS:
+        try:
+            r = await http_client.get(url, follow_redirects=True, timeout=10.0)
+            code = r.status_code
+            if code != 200:
+                response_body = (r.text or "")[:RESPONSE_SNIPPET_MAX]
+        except Exception as ex:
+            error_message = repr(ex)
+    elif is_arax:
         # Liveness via the ARAX status API: a 200 proves the Flask backend is up
         # (not just the static frontend). The same payload carries the version.
         try:
@@ -1288,6 +1303,11 @@ async def run_check(monitor_id: int, url: str):
     # transaction open across a network call.
     if is_success:
         now_mono = time.monotonic()
+
+        if url in ROOT_LIVENESS_ENDPOINTS:
+            if now_mono - _last_code_version_fetch.get(monitor_id, 0.0) >= CODE_VERSION_REFRESH:
+                new_code_version = await fetch_arax_version(url + ARAX_STATUS_SUFFIX)
+                _last_code_version_fetch[monitor_id] = now_mono
 
         if is_arax:
             kinds = query_kinds_for(url)

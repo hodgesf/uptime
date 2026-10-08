@@ -134,6 +134,16 @@
         .bar:hover { transform: scaleY(1.12); opacity: .8; }
         .bars.mini .bar { width: 5px; height: 24px; }
 
+        /* instant hover label for status bars (the native title tooltip is slow) */
+        .bar-tip {
+            position: fixed; z-index: 50; pointer-events: none; display: none;
+            padding: 6px 9px; border-radius: 6px; font-size: 12px; line-height: 1.4; white-space: nowrap;
+            color: var(--text); background: var(--surface); border: 1px solid var(--border);
+            box-shadow: 0 4px 14px rgba(16,24,40,.14);
+        }
+        .bar-tip strong { display: block; font-weight: 600; }
+        .bar-tip span { color: var(--muted); }
+
         .strip-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 11px; }
         .strip-label { font-size: 13px; color: var(--muted); font-weight: 500; }
         .strip-pct { font-family: var(--font-display); font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -150,8 +160,29 @@
         </div>
         {% block content %}{% endblock %}
     </div>
+    <div class="bar-tip" id="bar-tip"></div>
 
     <script>
+        // Hover label for any .bar with data-date / data-detail. Delegated so it
+        // also covers bars the dashboard re-renders every few seconds.
+        (function () {
+            const tip = document.getElementById('bar-tip');
+            document.addEventListener('mouseover', e => {
+                const bar = e.target.closest && e.target.closest('.bar[data-date]');
+                if (!bar) { tip.style.display = 'none'; return; }
+                tip.innerHTML = '<strong></strong><span></span>';
+                tip.firstChild.textContent = bar.dataset.date;
+                tip.lastChild.textContent = bar.dataset.detail || '';
+                tip.style.display = 'block';
+                const r = bar.getBoundingClientRect(), t = tip.getBoundingClientRect();
+                const left = Math.min(Math.max(8, r.left + r.width / 2 - t.width / 2), window.innerWidth - t.width - 8);
+                const top = r.top - t.height - 8 < 8 ? r.bottom + 8 : r.top - t.height - 8;
+                tip.style.left = left + 'px';
+                tip.style.top = top + 'px';
+            });
+            window.addEventListener('scroll', () => { tip.style.display = 'none'; }, { passive: true });
+        })();
+
         // Compact, seconds-free duration: highest non-zero unit down through
         // minutes, capped at 3 units. Mirrors format_duration_str() on the server.
         function formatDuration(totalSeconds) {
