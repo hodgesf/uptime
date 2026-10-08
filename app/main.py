@@ -492,19 +492,6 @@ def incident_summary(events, now_ts, window_seconds):
     }
 
 
-def percentile(values, p):
-    """Linear-interpolated percentile (p in [0,1]) of a numeric list."""
-    if not values:
-        return 0
-    s = sorted(values)
-    if len(s) == 1:
-        return s[0]
-    k = (len(s) - 1) * p
-    lo = int(k)
-    hi = min(lo + 1, len(s) - 1)
-    return s[lo] + (s[hi] - s[lo]) * (k - lo)
-
-
 def _get_cert_expiry_ts(url):
     """Epoch seconds when the TLS cert expires, or None. Blocking — call via
     asyncio.to_thread()."""
@@ -569,28 +556,58 @@ async def dashboard(request: Request):
     return templates.TemplateResponse(request, "dashboard.html")
 
 
+def status_seconds(events, now_ts, window_seconds, status) -> int:
+    """Seconds spent in `status` (up|degraded|down) over the last window."""
+    evs = sorted(events, key=lambda e: e.changed_at_ts)
+    win_start = now_ts - window_seconds
+    total = 0
+    for i, e in enumerate(evs):
+        if event_status(e) != status:
+            continue
+        end = evs[i + 1].changed_at_ts if i + 1 < len(evs) else now_ts
+        total += max(0, min(end, now_ts) - max(e.changed_at_ts, win_start))
+    return total
+
+
+def last_incident(events, now_ts, tz) -> dict | None:
+    """The most recent stretch spent not-up (degraded and/or down, back to
+    back), or None if there's never been one. Its kind is the worst state
+    reached; it's ongoing if the monitor hasn't returned to up since."""
+    evs = sorted(events, key=lambda e: e.changed_at_ts)
+    end_ts = None
+    i = len(evs) - 1
+    if i >= 0 and event_status(evs[i]) == "up":
+        end_ts = evs[i].changed_at_ts
+        i -= 1
+    worst = None
+    start_ts = None
+    while i >= 0 and event_status(evs[i]) != "up":
+        if worst != "down":
+            worst = event_status(evs[i])
+        start_ts = evs[i].changed_at_ts
+        i -= 1
+    if start_ts is None:
+        return None
+    ongoing = end_ts is None
+    return {
+        "when": datetime.fromtimestamp(start_ts, tz).strftime("%b %-d, %-I:%M %p"),
+        "kind": "Down" if worst == "down" else "Degraded",
+        "class": "down" if worst == "down" else "degraded",
+        "duration": format_duration_str((now_ts if ongoing else end_ts) - start_ts),
+        "ago": format_duration_str(now_ts - start_ts),
+        "ongoing": ongoing,
+    }
+
+
 @app.get("/monitor/{monitor_id}", response_class=HTMLResponse)
 async def monitor_detail(request: Request, monitor_id: int):
     pacific = ZoneInfo("America/Los_Angeles")
     now_ts = int(time.time())
-    one_day_ago_dt = datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
-    one_day_ago_ts = int(one_day_ago_dt.timestamp())
 
     async with AsyncSessionLocal() as session:
         monitor = await session.get(Monitor, monitor_id)
-        if not monitor: raise HTTPException(status_code=404)
-        
-        events = (await session.execute(
-            select(StateEvent)
-            .where(StateEvent.monitor_id == monitor_id, StateEvent.changed_at_ts >= one_day_ago_ts)
-            .order_by(StateEvent.changed_at_ts.desc())
-        )).scalars().all()
-        
-        checks = (await session.execute(
-            select(Check)
-            .where(Check.monitor_id == monitor_id, Check.checked_at >= one_day_ago_dt)
-            .order_by(Check.checked_at.asc())
-        )).scalars().all()
+        if not monitor:
+            raise HTTPException(status_code=404)
 
         all_events = (await session.execute(
             select(StateEvent)
@@ -621,25 +638,6 @@ async def monitor_detail(request: Request, monitor_id: int):
     # 30-day daily buckets for the status-bar strip
     daily = compute_daily_status(all_events, now_ts, pacific, days=30)
 
-    # Latency stats (24h) from raw checks; downsample the chart to 5-min buckets.
-    # Only checks that timed a request carry a latency sample (ARAX nodes sample
-    # via the /query probe every QUERY_INTERVAL), so skip rows with no sample.
-    latencies = [c.response_time_ms for c in checks if c.response_time_ms is not None]
-    avg_lat = round(sum(latencies) / len(latencies), 1) if latencies else 0
-    p95_lat = round(percentile(latencies, 0.95)) if latencies else 0
-
-    LAT_BUCKET = 300  # seconds per chart point
-    bins: dict[int, list] = {}
-    for c in checks:
-        if c.response_time_ms is None:
-            continue
-        dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
-        ts = int(dt.timestamp())
-        bins.setdefault(ts - (ts % LAT_BUCKET), []).append(c.response_time_ms)
-    chart_points = sorted(bins.items())
-    chart_data = [round(sum(v) / len(v)) for _, v in chart_points]
-    chart_labels = [datetime.fromtimestamp(b, tz=pacific).strftime('%I:%M %p') for b, _ in chart_points]
-
     time_in_status_str = (
         format_duration_str(now_ts - monitor.last_state_change_ts)
         if monitor.last_state_change_ts is not None else "Pending"
@@ -650,6 +648,7 @@ async def monitor_detail(request: Request, monitor_id: int):
     up_7d = uptime_over(all_events, now_ts, 7 * 86400)
     up_30d = uptime_over(all_events, now_ts, 30 * 86400)
     incidents = incident_summary(all_events, now_ts, 30 * 86400)
+    degraded_30d = status_seconds(all_events, now_ts, 30 * 86400, "degraded")
     cert_ts = _cert_expiry.get(monitor_id)
     cert_days = (cert_ts - now_ts) // 86400 if cert_ts else None
 
@@ -658,147 +657,15 @@ async def monitor_detail(request: Request, monitor_id: int):
     else:
         status_label, status_class = monitor.health.upper(), monitor.health
 
-    # Capture the current status now, before the downtime loop below reuses the
-    # `status_label` name for its per-check labels.
-    current_status_label, current_status_class = status_label, status_class
-
-    failure_log = build_failure_log(failed_checks, query_failures, pacific)
-
-    # Build downtime analysis
-    downtime_sections = []
-    sorted_events = sorted(events, key=lambda e: e.changed_at_ts, reverse=True)
-    
-    for i, event in enumerate(sorted_events):
-        # Find DOWN events (events where is_up changed to False)
-        if not event.is_up:
-            # Find the recovery event (next event where is_up is True)
-            recovery_event = None
-            for j in range(i-1, -1, -1):
-                if sorted_events[j].is_up:
-                    recovery_event = sorted_events[j]
-                    break
-            
-            if recovery_event:
-                down_start_ts = event.changed_at_ts
-                recovery_ts = recovery_event.changed_at_ts
-                
-                # Get checks: 2 before down, during down, 2 after recovery
-                downtime_checks = [c for c in checks if c.checked_at >= datetime.fromtimestamp(down_start_ts - 300, tz=ZoneInfo("UTC")).replace(tzinfo=None) and c.checked_at <= datetime.fromtimestamp(recovery_ts + 300, tz=ZoneInfo("UTC")).replace(tzinfo=None)]
-                
-                if downtime_checks:
-                    downtime_html = '<table style="width:100%; border-collapse: collapse;"><thead><tr><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Time (PT)</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Status Code</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Status</th><th style="text-align:left; padding:8px; border-bottom:1px solid var(--border-color);">Code Version</th></tr></thead><tbody>'
-                    
-                    # Track code versions before and after for change detection
-                    before_down_checks = []
-                    after_recovery_checks = []
-                    
-                    for c in downtime_checks:
-                        dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
-                        check_time = dt.astimezone(pacific).strftime('%m/%d %I:%M:%S %p %Z')
-                        
-                        # Get timestamp consistently - convert to UTC datetime if needed, then get timestamp
-                        if c.checked_at.tzinfo:
-                            check_ts = int(c.checked_at.timestamp())
-                        else:
-                            # Naive datetime - assume UTC and convert
-                            check_ts = int(c.checked_at.replace(tzinfo=ZoneInfo("UTC")).timestamp())
-                        
-                        # Determine status: before down, during down, or after recovery
-                        if check_ts < down_start_ts:
-                            status_label = "Before Down"
-                            before_down_checks.append(c)
-                        elif check_ts >= recovery_ts:
-                            status_label = "After Recovery"
-                            after_recovery_checks.append(c)
-                        else:
-                            status_label = "During Down"
-                        
-                        status_color = "var(--down-color)" if status_label == "During Down" else "var(--text-secondary)"
-                        code_color = "var(--down-color)" if c.status_code == 0 or c.status_code >= 400 else "var(--up-color)"
-                        
-                        # Display error message if status code is 0, otherwise show the code
-                        error_display = c.error_message if c.status_code == 0 and c.error_message else str(c.status_code)
-                        
-                        # Extract build date from check's code_version
-                        build_date = "Unknown"
-                        if c.code_version:
-                            # Try multiple patterns for extraction
-                            date_match = re.search(r"done on\s+(\d{4}-\d{2}-\d{2})", c.code_version)
-                            if date_match:
-                                build_date = date_match.group(1)
-                            else:
-                                date_match = re.search(r"build date:\s*(\d{4}-\d{2}-\d{2})", c.code_version)
-                                if date_match:
-                                    build_date = date_match.group(1)
-                                else:
-                                    any_date_match = re.search(r"(\d{4}-\d{2}-\d{2})", c.code_version)
-                                    if any_date_match:
-                                        build_date = any_date_match.group(1)
-                        
-                        downtime_html += f'<tr><td style="padding:8px; border-bottom:1px solid var(--border-color);">{check_time}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{code_color}; font-weight:bold;">{error_display}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); color:{status_color}; font-weight:500;">{status_label}</td><td style="padding:8px; border-bottom:1px solid var(--border-color); font-size:0.9em; color:var(--text-secondary);">{build_date}</td></tr>'
-                    
-                    downtime_html += '</tbody></table>'
-                    
-                    down_start_str = datetime.fromtimestamp(down_start_ts, tz=pacific).strftime('%m/%d %I:%M %p %Z')
-                    recovery_str = datetime.fromtimestamp(recovery_ts, tz=pacific).strftime('%m/%d %I:%M %p %Z')
-                    downtime_duration = format_duration_str(recovery_ts - down_start_ts)
-                    
-                    # Check if code version changed between before and after recovery
-                    code_version_changed = False
-                    change_note = ""
-                    if before_down_checks and after_recovery_checks:
-                        # Get the last check before down and first check after recovery
-                        last_before = before_down_checks[-1]
-                        first_after = after_recovery_checks[0]
-                        
-                        # Extract build dates from both
-                        def extract_build_date(check):
-                            if not check.code_version:
-                                return None
-                            # Try multiple patterns
-                            # Pattern 1: "done on YYYY-MM-DD"
-                            date_match = re.search(r"done on\s+(\d{4}-\d{2}-\d{2})", check.code_version)
-                            if date_match:
-                                return date_match.group(1)
-                            # Pattern 2: "build date: YYYY-MM-DD"
-                            date_match = re.search(r"build date:\s*(\d{4}-\d{2}-\d{2})", check.code_version)
-                            if date_match:
-                                return date_match.group(1)
-                            # Pattern 3: Any YYYY-MM-DD pattern
-                            any_date_match = re.search(r"(\d{4}-\d{2}-\d{2})", check.code_version)
-                            if any_date_match:
-                                return any_date_match.group(1)
-                            return None
-                        
-                        before_date = extract_build_date(last_before)
-                        after_date = extract_build_date(first_after)
-                        
-                        if before_date and after_date and before_date != after_date:
-                            code_version_changed = True
-                            change_note = f' <span style="color: var(--link-color); font-weight: 500;">⚠️ Code version changed: {before_date} → {after_date}</span>'
-                    
-                    downtime_sections.append(f'''
-                    <details style="margin-bottom: 15px; border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; background: var(--card-bg);">
-                        <summary style="font-weight: 600; cursor: pointer; padding: 5px; color: var(--down-color);">Downtime Event - {down_start_str} ({downtime_duration}){change_note}</summary>
-                        <div style="padding:15px; margin-top:10px;">
-                            {downtime_html}
-                        </div>
-                    </details>
-                    ''')
-    
-    downtime_section_html = "".join(downtime_sections) if downtime_sections else ""
-
     return templates.TemplateResponse(
         request,
         "monitor.html",
         {
             "monitor_url": monitor.url,
-            "status_label": current_status_label,
-            "status_class": current_status_class,
+            "status_label": status_label,
+            "status_class": status_class,
             "initialized": monitor.last_state_change_ts is not None,
             "time_in_status_str": time_in_status_str,
-            "avg_lat": avg_lat,
-            "p95_lat": p95_lat,
             "daily": daily,
             "uptime_24h": up_24h,
             "uptime_7d": up_7d,
@@ -806,13 +673,12 @@ async def monitor_detail(request: Request, monitor_id: int):
             "incident_count": incidents["count"],
             "total_down_str": "0m" if incidents["total_down"] == 0 else format_duration_str(incidents["total_down"]),
             "longest_down_str": "—" if incidents["longest"] == 0 else format_duration_str(incidents["longest"]),
+            "degraded_30d_str": "0m" if degraded_30d == 0 else format_duration_str(degraded_30d),
+            "last_incident": last_incident(all_events, now_ts, pacific),
             "cert_days": cert_days,
             "queries": queries,
-            "downtime_html": downtime_section_html,
-            "failure_log": failure_log,
+            "failure_log": build_failure_log(failed_checks, query_failures, pacific),
             "failure_log_days": FAILURE_LOG_DAYS,
-            "chart_labels": chart_labels,
-            "chart_data": chart_data,
             "start_ts": monitor.last_state_change_ts or 0,
         },
     )

@@ -3,10 +3,6 @@
 {% block title %}{{ monitor_url }}{% endblock %}
 {% block brand %}Endpoint Monitor{% endblock %}
 
-{% block head %}
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-{% endblock %}
-
 {% block styles %}
         .back { font-size: 13px; color: var(--muted); display: inline-block; margin-bottom: 16px; }
         .back:hover { color: var(--accent); text-decoration: none; }
@@ -34,6 +30,10 @@
         .stat .v.down { color: var(--down); }
         .stat .v.pending { color: var(--muted); }
         .stat .v.warn, .stat .v.degraded { color: var(--degraded); }
+        .stat .v.sm { font-size: 16px; }
+        .stat .sub { margin-top: 4px; font-size: 12px; color: var(--muted); }
+        .stat .sub.down { color: var(--down); }
+        .stat .sub.degraded { color: var(--degraded); }
         .queries { padding: 16px 20px; margin-bottom: 16px; }
         .queries h4 { margin: 0 0 10px; font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; font-family: var(--font-body); }
         .qrow { display: flex; align-items: baseline; gap: 12px; padding: 7px 0; border-top: 1px solid var(--border); font-size: 13px; }
@@ -99,12 +99,20 @@
             <div class="v num" id="stat-duration">{% if initialized %}{{ time_in_status_str }}{% else %}—{% endif %}</div>
         </div>
         <div class="stat card">
-            <h4>Avg latency · 24h</h4>
-            <div class="v num">{% if initialized %}{{ avg_lat }} ms{% else %}—{% endif %}</div>
+            <h4>Last incident</h4>
+            {% if last_incident %}
+            <div class="v num sm">{{ last_incident.when }}</div>
+            <div class="sub {{ last_incident.class }}">
+                {% if last_incident.ongoing %}Ongoing · {{ last_incident.kind }} {{ last_incident.duration }}
+                {% else %}{{ last_incident.kind }} {{ last_incident.duration }} · {{ last_incident.ago }} ago{% endif %}
+            </div>
+            {% else %}
+            <div class="v num">None</div>
+            {% endif %}
         </div>
         <div class="stat card">
-            <h4>p95 latency · 24h</h4>
-            <div class="v num">{% if initialized %}{{ p95_lat }} ms{% else %}—{% endif %}</div>
+            <h4>Degraded time · 30d</h4>
+            <div class="v num">{{ degraded_30d_str }}</div>
         </div>
         <div class="stat card">
             <h4>Incidents · 30d</h4>
@@ -145,15 +153,6 @@
     </div>
     {% endif %}
 
-    {{ downtime_html | safe }}
-
-    <details class="panel card">
-        <summary>Latency · last 24h</summary>
-        <div class="panel-body">
-            {% if initialized %}<canvas id="latencyChart" height="90"></canvas>{% else %}<p style="color: var(--muted); margin: 4px 0;">Awaiting first check…</p>{% endif %}
-        </div>
-    </details>
-
     <details class="panel card"{% if failure_log %} open{% endif %}>
         <summary>Failure log · last {{ failure_log_days }} days{% if failure_log %} ({{ failure_log | length }}){% endif %}</summary>
         <div class="panel-body">
@@ -192,30 +191,5 @@
     updateDuration();
     setInterval(updateDuration, 15000);
 
-    const cv = document.getElementById('latencyChart');
-    if (cv) {
-        const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#6366f1';
-        new Chart(cv, {
-            type: 'line',
-            data: {
-                labels: {{ chart_labels | tojson }},
-                datasets: [{
-                    label: 'Latency (ms)',
-                    data: {{ chart_data | tojson }},
-                    borderColor: accent,
-                    backgroundColor: 'rgba(99,102,241,.12)',
-                    fill: true, tension: .3, pointRadius: 0, borderWidth: 2
-                }]
-            },
-            options: {
-                responsive: true,
-                plugins: { legend: { display: false } },
-                scales: {
-                    y: { beginAtZero: true, grid: { color: 'rgba(128,128,128,.14)' } },
-                    x: { grid: { display: false }, ticks: { maxTicksLimit: 8 } }
-                }
-            }
-        });
-    }
 </script>
 {% endblock %}
