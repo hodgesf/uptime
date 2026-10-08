@@ -3,14 +3,15 @@
 Base.metadata.create_all() creates missing tables but never alters existing
 ones, so new columns on existing tables are added here. Every step is
 idempotent and nothing is dropped, so history is preserved. Before changing
-anything, the database is copied to uptime.db.bak-<timestamp>.
+anything, the database is backed up to the single rolling uptime.db.bak.
 
 Runs automatically on startup; can also be run by hand:
     python -m app.migrations [path/to/uptime.db]
 """
 import sqlite3
 import sys
-from datetime import datetime
+
+from .backup import backup_db
 
 # (table, column, SQL type/default) added if missing.
 COLUMNS = [
@@ -45,10 +46,7 @@ def migrate(db_path: str) -> list[str]:
         if not missing:
             return []
 
-        backup_path = f"{db_path}.bak-{datetime.now():%Y%m%d-%H%M%S}"
-        with sqlite3.connect(backup_path) as backup:
-            conn.backup(backup)
-        changes = [f"backed up to {backup_path}"]
+        changes = [f"backed up to {backup_db(db_path)}"]
 
         with conn:
             for t, c, ddl in missing:

@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # Deploy the latest uptime monitor code on the server.
 #   Usage (on the server): ./update_uptime.sh
-# Backs up the DB, pulls, reinstalls deps if requirements.txt changed,
-# restarts uptime.service and confirms it came back up.
+# Backs up the DB (one rolling copy, uptime.db.bak), pulls, reinstalls deps if
+# requirements.txt changed, restarts uptime.service and confirms it came back up.
 set -euo pipefail
 
 APP_DIR=/home/ubuntu/uptime
 SERVICE=uptime
-BACKUP_DIR="$HOME/uptime-backups"
-KEEP_BACKUPS=10
 
 # Everything runs inside main(), which bash reads in full before running it,
 # so the `git pull` below can safely replace this file mid-run.
@@ -21,18 +19,10 @@ main() {
         exit 1
     fi
 
-    # Back up the DB with SQLite's backup API, which gives a consistent copy even
-    # while the service is writing (a plain cp can catch it mid-write).
-    mkdir -p "$BACKUP_DIR"
-    backup="$BACKUP_DIR/uptime.db.$(date +%Y%m%d-%H%M%S)"
-    venv/bin/python - "$backup" <<'EOF'
-import sqlite3, sys
-src = sqlite3.connect("uptime.db")
-with sqlite3.connect(sys.argv[1]) as dst:
-    src.backup(dst)
-EOF
-    echo "DB backed up to $backup"
-    ls -1t "$BACKUP_DIR"/uptime.db.* | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm --
+    # One rolling, compact backup (uptime.db.bak), replacing the previous one.
+    # Safe while the service is running; stops here if the disk is too full.
+    venv/bin/python -m app.backup uptime.db
+    backup="$APP_DIR/uptime.db.bak"
 
     old_rev=$(git rev-parse HEAD)
     git pull --ff-only
