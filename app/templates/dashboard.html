@@ -11,6 +11,8 @@
         .overview.up .ov-dot::after { background: var(--up); }
         .overview.down .ov-dot { background: var(--down-tint); }
         .overview.down .ov-dot::after { background: var(--down); }
+        .overview.degraded .ov-dot { background: var(--degraded-tint); }
+        .overview.degraded .ov-dot::after { background: var(--degraded); }
         .overview.pending .ov-dot { background: var(--surface-2); }
         .overview.pending .ov-dot::after { background: var(--muted); }
         .ov-title { font-family: var(--font-display); font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
@@ -24,6 +26,7 @@
         .m-name a:hover { color: var(--accent); text-decoration: none; }
         .m-meta { margin-top: 7px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; font-size: 12px; color: var(--muted); }
         .m-meta .sep { opacity: .45; }
+        .m-left .qbadges { margin-top: 9px; }
         .m-right { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 7px; }
         .m-uptime { font-family: var(--font-display); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
         .m-range { font-weight: 500; opacity: .6; }
@@ -52,8 +55,23 @@
     function barsHtml(daily) {
         if (!daily || !daily.length) return '';
         return daily.map(d => {
-            const label = d.uptime === null ? 'No data' : d.uptime + '% uptime';
+            let label = d.uptime === null ? 'No data' : d.uptime + '% uptime';
+            if (d.degraded_seconds) label += ` · degraded ${Math.round(d.degraded_seconds / 60)}m`;
             return `<div class="bar ${d.status}" title="${d.date} — ${label}"></div>`;
+        }).join('');
+    }
+
+    function queryTitle(q) {
+        const when = q.checked_str ? ` (${q.checked_str}${q.stale ? ', stale' : ''})` : '';
+        if (q.rechecking) return `${q.label}: failed once (${q.error}), rechecking${when}`;
+        if (q.ok === null) return `${q.label}: not checked yet`;
+        return q.ok ? `${q.label}: passing${when}` : `${q.label}: ${q.error || 'failing'}${when}`;
+    }
+
+    function badgesHtml(queries) {
+        return (queries || []).map(q => {
+            const cls = q.ok === null ? '' : (q.stale ? 'stale' : (q.ok ? 'ok' : 'fail'));
+            return `<span class="qbadge ${cls}">${q.label}</span>`;
         }).join('');
     }
 
@@ -70,12 +88,16 @@
         catch (e) { console.error(e); return; }
 
         const container = document.getElementById('monitors');
-        let upCount = 0, anyPending = false;
+        let upCount = 0, degradedCount = 0, downCount = 0, anyPending = false;
         const total = data.length;
 
         data.forEach(m => {
-            if (m.is_up === true) upCount++;
-            if (m.is_up === null) anyPending = true;
+            // health: up (green) | degraded (yellow: some query failing) |
+            // down (red: unreachable, or every query failing) | null (pending)
+            if (m.health === 'up') upCount++;
+            else if (m.health === 'degraded') degradedCount++;
+            else if (m.health === 'down') downCount++;
+            else anyPending = true;
 
             let el = rows[m.id];
             if (!el) {
@@ -92,6 +114,7 @@
                             <span data-build></span>
                             <a class="visit" target="_blank" rel="noopener noreferrer" data-visit>visit ↗</a>
                         </div>
+                        <div class="qbadges" data-queries></div>
                     </div>
                     <div class="m-right">
                         <div class="bars mini" data-bars></div>
@@ -106,8 +129,9 @@
             const pill = el.querySelector('[data-pill]');
             const statusText = el.querySelector('[data-status]');
             const since = el.querySelector('[data-since]');
-            if (m.is_up === null) { pill.className = 'pill pending'; statusText.textContent = 'Checking'; since.dataset.verb = ''; }
-            else if (m.is_up) { pill.className = 'pill up'; statusText.textContent = 'Up'; since.dataset.verb = 'up'; }
+            if (!m.health) { pill.className = 'pill pending'; statusText.textContent = 'Checking'; since.dataset.verb = ''; }
+            else if (m.health === 'degraded') { pill.className = 'pill degraded'; statusText.textContent = 'Degraded'; since.dataset.verb = 'degraded'; }
+            else if (m.health === 'up') { pill.className = 'pill up'; statusText.textContent = 'Up'; since.dataset.verb = 'up'; }
             else { pill.className = 'pill down'; statusText.textContent = 'Down'; since.dataset.verb = 'down'; }
 
             el.querySelector('[data-uptime]').textContent = (m.uptime_24h === null || m.uptime_24h === undefined) ? '—' : m.uptime_24h + '%';
@@ -115,6 +139,14 @@
 
             since.dataset.ts = m.last_state_change_ts || 0;
             renderSince(since);
+            const failing = (m.queries || []).filter(q => q.ok === false);
+            pill.title = m.is_up === false ? 'Status check failing'
+                : failing.map(queryTitle).join('\n');
+
+            const qEl = el.querySelector('[data-queries]');
+            qEl.innerHTML = badgesHtml(m.queries);
+            // Set titles via DOM so error text is never parsed as HTML.
+            (m.queries || []).forEach((q, i) => { qEl.children[i].title = queryTitle(q); });
 
             const build = el.querySelector('[data-build]');
             let bd = '';
@@ -131,19 +163,22 @@
         const ov = document.getElementById('overview');
         const title = document.getElementById('ov-title');
         const sub = document.getElementById('ov-sub');
-        if (anyPending && upCount < total) {
+        const parts = [`${upCount} up`];
+        if (degradedCount) parts.push(`${degradedCount} degraded`);
+        if (downCount) parts.push(`${downCount} down`);
+        sub.textContent = parts.join(' · ');
+        if (anyPending) {
             ov.className = 'overview card pending';
             title.textContent = 'Checking endpoints…';
-            sub.textContent = `${upCount} of ${total} endpoints up`;
-        } else if (upCount === total && total > 0) {
+        } else if (downCount > 0) {
+            ov.className = 'overview card down';
+            title.textContent = `${downCount} Endpoint${downCount === 1 ? '' : 's'} Down`;
+        } else if (degradedCount > 0) {
+            ov.className = 'overview card degraded';
+            title.textContent = `${degradedCount} Endpoint${degradedCount === 1 ? '' : 's'} Degraded`;
+        } else if (total > 0) {
             ov.className = 'overview card up';
             title.textContent = 'All Systems Operational';
-            sub.textContent = `${total} of ${total} endpoints up`;
-        } else {
-            ov.className = 'overview card down';
-            const down = total - upCount;
-            title.textContent = `${down} Endpoint${down === 1 ? '' : 's'} Down`;
-            sub.textContent = `${upCount} of ${total} endpoints up`;
         }
     }
 

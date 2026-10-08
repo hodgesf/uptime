@@ -5,6 +5,7 @@ import ssl
 import socket
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 import httpx
@@ -12,8 +13,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, delete
-from .database import Base, engine, AsyncSessionLocal
-from .models import Monitor, Check, StateEvent
+from .database import Base, engine, AsyncSessionLocal, DATABASE_URL
+from .migrations import migrate
+from .models import Monitor, Check, StateEvent, QueryStatus, QueryFailure
 
 # --- Configuration ---
 CHECK_INTERVAL = 60  # seconds between checks (liveness poll cadence)
@@ -25,13 +27,8 @@ ENDPOINTS = [
     "https://arax.ncats.io/test",
     "https://arax.ncats.io/shepherd",
     "https://arax.ncats.io/beta",
-    "https://arax.ncats.io/legacy",
     "https://arax.ncats.io/devED",
     "https://arax.ncats.io/devLM",
-    "https://kg2cploverdb.ci.transltr.io",
-    "https://kg2cploverdb.test.transltr.io",
-    "https://multiomics.rtx.ai:9990",
-    "https://multiomics.ci.transltr.io",
 ]
 
 # ARAX endpoints are monitored via the ARAX status API rather than a plain root
@@ -46,39 +43,147 @@ ARAX_ENDPOINTS = {
     "https://arax.ncats.io/test",
     "https://arax.ncats.io/shepherd",
     "https://arax.ncats.io/beta",
-    "https://arax.ncats.io/legacy",
     "https://arax.ncats.io/devED",
     "https://arax.ncats.io/devLM",
 }
 ARAX_STATUS_SUFFIX = "/api/arax/v1.4/status?mode=site_config"
 ARAX_QUERY_SUFFIX = "/api/arax/v1.4/query"
 
-# Latency for ARAX nodes is measured by firing a real TRAPI reasoning query at
-# most once per QUERY_INTERVAL. It exercises the backend end-to-end but is slow,
-# so it gets its own generous timeout and NEVER affects up/down — only latency.
-QUERY_INTERVAL = 3600  # seconds between /query latency probes per monitor (1/hour)
-ARAX_QUERY_TIMEOUT = 60.0  # seconds; a reasoning query can take a while
-# `submitter` identifies these probe queries in ARAX's logs so they can be told
-# apart from real user traffic.
-ARAX_QUERY_BODY = {
-    "submitter": "UpTimeARAX",
-    "message": {
-        "query_graph": {
-            "edges": {
-                "e00": {
-                    "subject": "n00",
-                    "object": "n01",
-                    "predicates": ["biolink:interacts_with"],
-                }
-            },
-            "nodes": {
-                "n00": {"ids": ["CHEBI:46195"]},
-                "n01": {"categories": ["biolink:Protein"]},
-            },
-        }
-    }
+# Once per QUERY_INTERVAL each ARAX node gets real TRAPI reasoning queries that
+# check the reasoner actually works: a 200 with a non-empty message.results
+# passes; anything else (error, timeout, no results) fails.
+#
+# Every ARAX node gets the "lookup" query (run inline; it is also the latency
+# sample). FULL_PROBE_ENDPOINTS additionally get xDTD, xCRG and Pathfinder, run
+# sequentially in a background task because they can take minutes.
+#
+# Health (see compute_health):
+#   red    — status API down, or a full-probe node failing ALL of its queries
+#   yellow — status API up but at least one query failing
+#   green  — status API up and every query passing
+#
+# A query only counts as failing after QUERY_FAIL_THRESHOLD consecutive
+# failures; while failing (or awaiting confirmation) it's re-checked every
+# QUERY_RETRY_INTERVAL instead of hourly.
+QUERY_INTERVAL = 3600  # seconds between /query probes of a passing query (1/hour)
+QUERY_RETRY_INTERVAL = 300  # seconds between probes of a failing query
+QUERY_FAIL_THRESHOLD = 2  # consecutive failures before a query counts as failing
+# A result older than this is shown as stale (grey) — e.g. the node was down,
+# so its queries couldn't run.
+QUERY_STALE_AFTER = 2 * QUERY_INTERVAL
+RESPONSE_SNIPPET_MAX = 8000  # chars of a failed response kept for the failure log
+QUERY_TIMEOUTS = {  # seconds; inferred queries routinely take a minute or more
+    "lookup": 60.0,
+    "xdtd": 300.0,
+    "xcrg": 300.0,
+    "pathfinder": 300.0,
 }
-_last_query_probe: dict[int, float] = {}
+QUERY_LABELS = {"lookup": "Lookup", "xdtd": "xDTD", "xcrg": "xCRG", "pathfinder": "Pathfinder"}
+FULL_PROBE_ENDPOINTS = {
+    "https://arax.ci.transltr.io",
+    "https://arax.test.transltr.io",
+    "https://arax.ncats.io",
+}
+QUERY_GRAPHS = {
+    "lookup": {
+        "edges": {
+            "e00": {
+                "subject": "n00",
+                "object": "n01",
+                "predicates": ["biolink:interacts_with"],
+            }
+        },
+        "nodes": {
+            "n00": {"ids": ["CHEBI:46195"]},
+            "n01": {"categories": ["biolink:Protein"]},
+        },
+    },
+    "xdtd": {
+        "edges": {
+            "t_edge": {
+                "attribute_constraints": [],
+                "knowledge_type": "inferred",
+                "object": "on",
+                "predicates": ["biolink:treats"],
+                "qualifier_constraints": [],
+                "subject": "sn",
+            }
+        },
+        "nodes": {
+            "on": {
+                "categories": ["biolink:Disease"],
+                "constraints": [],
+                "ids": ["MONDO:0015564"],
+                "is_set": False,
+            },
+            "sn": {
+                "categories": ["biolink:ChemicalEntity"],
+                "constraints": [],
+                "is_set": False,
+            },
+        },
+    },
+    "xcrg": {
+        "edges": {
+            "t_edge": {
+                "knowledge_type": "inferred",
+                "object": "on",
+                "predicates": ["biolink:affects"],
+                "qualifier_constraints": [
+                    {
+                        "qualifier_set": [
+                            {
+                                "qualifier_type_id": "biolink:object_aspect_qualifier",
+                                "qualifier_value": "activity_or_abundance",
+                            },
+                            {
+                                "qualifier_type_id": "biolink:object_direction_qualifier",
+                                "qualifier_value": "increased",
+                            },
+                        ]
+                    }
+                ],
+                "subject": "sn",
+            }
+        },
+        "nodes": {
+            "on": {"categories": ["biolink:Gene"], "ids": ["NCBIGene:1576"]},
+            "sn": {"categories": ["biolink:ChemicalEntity"]},
+        },
+    },
+    "pathfinder": {
+        "nodes": {
+            "n0": {"ids": ["MONDO:0005011"]},
+            "n1": {"ids": ["MONDO:0005180"]},
+        },
+        "paths": {
+            "p0": {
+                "subject": "n0",
+                "object": "n1",
+                "predicates": ["biolink:related_to"],
+            }
+        },
+    },
+}
+# Monotonic time each (monitor_id, kind) probe is next due; missing = due now.
+_next_probe: dict[tuple[int, str], float] = {}
+# Monitors with a background xDTD/xCRG/Pathfinder run in progress.
+_extended_inflight: set[int] = set()
+# Strong refs to in-flight background probe tasks so they aren't GC'd mid-run.
+_probe_tasks: set[asyncio.Task] = set()
+# Confirmed liveness after each monitor's last check, to spot DOWN -> UP.
+_last_status_up: dict[int, bool] = {}
+# Last health each monitor was alerted as; Slack only hears about changes.
+_alerted_health: dict[int, str | None] = {}
+# Serializes health updates per monitor (run_check and background probes both
+# write them).
+_health_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def query_kinds_for(url: str) -> list[str]:
+    if url not in ARAX_ENDPOINTS:
+        return []
+    return list(QUERY_LABELS) if url in FULL_PROBE_ENDPOINTS else ["lookup"]
 
 import os
 import re
@@ -169,6 +274,12 @@ async def send_slack_message(text: str, url: str | None = None):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Add new columns to an existing DB in place (backing it up first), then
+    # create any brand-new tables.
+    db_path = DATABASE_URL.split("///", 1)[1]
+    if os.path.exists(db_path):
+        for change in await asyncio.to_thread(migrate, db_path):
+            print(f"[MIGRATE] {change}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -188,11 +299,12 @@ async def lifespan(app: FastAPI):
                     last_state_change_ts=None
                 ))
 
-        # Delete removed
+        # Seed from the DB so a restart doesn't re-announce current states.
         for m in monitors:
-            if m.url not in ENDPOINTS:
-                await session.delete(m)
+            _alerted_health[m.id] = m.health
 
+        # Monitors no longer in ENDPOINTS are kept (with their history) but are
+        # no longer checked or shown on the dashboard.
         await session.commit()
 
     checker_task = asyncio.create_task(checker_loop())
@@ -254,23 +366,31 @@ def _bucket_boundaries(now_ts, tz, count, unit):
     return out
 
 
+def event_status(e) -> str:
+    """up|degraded|down for a StateEvent (rows predating `status` only knew
+    up/down)."""
+    return e.status or ("up" if e.is_up else "down")
+
+
 def compute_uptime_buckets(events, now_ts, tz, count, unit):
-    """Reconstruct per-bucket up/down status over the last `count` buckets from
-    state events. Returns a list (oldest first) of dicts:
+    """Reconstruct per-bucket health over the last `count` buckets from state
+    events. A bucket takes the worst state seen in it: any downtime -> down
+    (red), else any degraded time -> degraded (yellow), else up. Only downtime
+    counts against uptime %. Returns a list (oldest first) of dicts:
         {date, status: up|down|degraded|nodata, uptime: float|None,
-         down_seconds, up_seconds, total_seconds}
+         down_seconds, degraded_seconds, up_seconds, total_seconds}
     """
     evs = sorted(events, key=lambda e: e.changed_at_ts)
     monitoring_start = evs[0].changed_at_ts if evs else None
 
-    # Contiguous state intervals [start, end) with a boolean up flag; the last
+    # Contiguous state intervals [start, end) with their status; the last
     # event runs to now.
     intervals = []
     for i, e in enumerate(evs):
         start = e.changed_at_ts
         end = evs[i + 1].changed_at_ts if i + 1 < len(evs) else now_ts
         if end > start:
-            intervals.append((start, end, e.is_up))
+            intervals.append((start, end, event_status(e)))
 
     result = []
     for b_start, b_end, label in _bucket_boundaries(now_ts, tz, count, unit):
@@ -279,28 +399,23 @@ def compute_uptime_buckets(events, now_ts, tz, count, unit):
 
         if monitoring_start is None or eff_end <= eff_start:
             result.append({"date": label, "status": "nodata", "uptime": None,
-                           "down_seconds": 0, "up_seconds": 0, "total_seconds": 0})
+                           "down_seconds": 0, "degraded_seconds": 0,
+                           "up_seconds": 0, "total_seconds": 0})
             continue
 
         total = eff_end - eff_start
-        down = 0
-        for s, e_, up in intervals:
-            if up:
-                continue
+        secs = {"up": 0, "degraded": 0, "down": 0}
+        for s, e_, st in intervals:
             overlap = min(e_, eff_end) - max(s, eff_start)
             if overlap > 0:
-                down += overlap
+                secs[st] = secs.get(st, 0) + overlap
+        down, degraded = secs["down"], secs["degraded"]
         up_sec = total - down
-        if down == 0:
-            status = "up"
-        elif up_sec <= 0:
-            status = "down"
-        else:
-            status = "degraded"
+        status = "down" if down > 0 else ("degraded" if degraded > 0 else "up")
         result.append({"date": label, "status": status,
                        "uptime": round(up_sec / total * 100, 3),
-                       "down_seconds": int(down), "up_seconds": int(up_sec),
-                       "total_seconds": int(total)})
+                       "down_seconds": int(down), "degraded_seconds": int(degraded),
+                       "up_seconds": int(up_sec), "total_seconds": int(total)})
     return result
 
 
@@ -383,6 +498,48 @@ def _get_cert_expiry_ts(url):
     except Exception:
         return None
 
+FAILURE_LOG_DAYS = 7
+FAILURE_LOG_MAX = 200  # most recent entries shown
+
+
+def build_failure_log(failed_checks, query_failures, tz) -> list[dict]:
+    """Failed status checks and failed /query probes, newest first. Repeats of
+    the same failure close together (e.g. every poll during an outage) are
+    collapsed into one entry showing the latest response."""
+    items = []
+    for c in failed_checks:
+        dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
+        summary = f"HTTP {c.status_code}" if c.status_code else (c.error_message or "no response")
+        items.append((int(dt.timestamp()), "Status", summary, c.response_body or c.error_message,
+                      2 * CHECK_INTERVAL + 30))
+    for q in query_failures:
+        items.append((q.checked_ts, QUERY_LABELS.get(q.kind, q.kind), q.error or "failed", q.response,
+                      QUERY_RETRY_INTERVAL + QUERY_TIMEOUTS.get(q.kind, 60) + 60))
+    items.sort(key=lambda i: i[0])
+
+    groups = []
+    last_by_source: dict[str, dict] = {}
+    for ts, source, summary, response, max_gap in items:
+        g = last_by_source.get(source)
+        if g and g["summary"] == summary and ts - g["last_ts"] <= max_gap:
+            g["count"] += 1
+            g["last_ts"] = ts
+            g["response"] = response or g["response"]
+            continue
+        g = {"source": source, "summary": summary, "response": response,
+             "first_ts": ts, "last_ts": ts, "count": 1}
+        groups.append(g)
+        last_by_source[source] = g
+
+    fmt = "%m/%d %I:%M %p"
+    for g in groups:
+        g["when"] = datetime.fromtimestamp(g["first_ts"], tz).strftime(fmt)
+        if g["count"] > 1:
+            g["when"] += " – " + datetime.fromtimestamp(g["last_ts"], tz).strftime(fmt)
+    groups.sort(key=lambda g: g["last_ts"], reverse=True)
+    return groups[:FAILURE_LOG_MAX]
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     return templates.TemplateResponse(request, "dashboard.html")
@@ -416,6 +573,26 @@ async def monitor_detail(request: Request, monitor_id: int):
             .where(StateEvent.monitor_id == monitor_id)
             .order_by(StateEvent.changed_at_ts.asc())
         )).scalars().all()
+
+        query_rows = (await session.execute(
+            select(QueryStatus).where(QueryStatus.monitor_id == monitor_id)
+        )).scalars().all()
+
+        log_since_dt = datetime.now(ZoneInfo("UTC")) - timedelta(days=FAILURE_LOG_DAYS)
+        failed_checks = (await session.execute(
+            select(Check)
+            .where(Check.monitor_id == monitor_id, Check.checked_at >= log_since_dt,
+                   Check.status_code != 200)
+            .order_by(Check.checked_at.asc())
+        )).scalars().all()
+        query_failures = (await session.execute(
+            select(QueryFailure)
+            .where(QueryFailure.monitor_id == monitor_id,
+                   QueryFailure.checked_ts >= int(log_since_dt.timestamp()))
+            .order_by(QueryFailure.checked_ts.asc())
+        )).scalars().all()
+
+    queries = load_query_statuses(query_rows, monitor.url, pacific, now_ts)
 
     # 30-day daily buckets for the status-bar strip
     daily = compute_daily_status(all_events, now_ts, pacific, days=30)
@@ -452,23 +629,16 @@ async def monitor_detail(request: Request, monitor_id: int):
     cert_ts = _cert_expiry.get(monitor_id)
     cert_days = (cert_ts - now_ts) // 86400 if cert_ts else None
 
-    if monitor.is_up is None:
+    if monitor.health is None:
         status_label, status_class = "INITIALIZING...", "pending"
     else:
-        status_label, status_class = ("UP" if monitor.is_up else "DOWN"), ("up" if monitor.is_up else "down")
+        status_label, status_class = monitor.health.upper(), monitor.health
 
     # Capture the current status now, before the downtime loop below reuses the
     # `status_label` name for its per-check labels.
     current_status_label, current_status_class = status_label, status_class
 
-    # FIX: Ensure Pacific conversion for Raw Logs - only if initialized
-    raw_logs_list = []
-    if monitor.last_state_change_ts is not None:
-        for c in reversed(checks):
-            # If datetime is naive, assume it's UTC; if it has tzinfo, use as-is
-            dt = c.checked_at if c.checked_at.tzinfo else c.checked_at.replace(tzinfo=ZoneInfo("UTC"))
-            raw_logs_list.append(f"<tr><td>{dt.astimezone(pacific).strftime('%m/%d %I:%M:%S %p %Z')}</td><td>{c.status_code}</td></tr>")
-    raw_logs = "".join(raw_logs_list)
+    failure_log = build_failure_log(failed_checks, query_failures, pacific)
 
     # Build downtime analysis
     downtime_sections = []
@@ -613,8 +783,10 @@ async def monitor_detail(request: Request, monitor_id: int):
             "total_down_str": "0m" if incidents["total_down"] == 0 else format_duration_str(incidents["total_down"]),
             "longest_down_str": "—" if incidents["longest"] == 0 else format_duration_str(incidents["longest"]),
             "cert_days": cert_days,
+            "queries": queries,
             "downtime_html": downtime_section_html,
-            "raw_logs_html": raw_logs,
+            "failure_log": failure_log,
+            "failure_log_days": FAILURE_LOG_DAYS,
             "chart_labels": chart_labels,
             "chart_data": chart_data,
             "start_ts": monitor.last_state_change_ts or 0,
@@ -631,13 +803,19 @@ async def status():
         all_events = (await session.execute(
             select(StateEvent).order_by(StateEvent.changed_at_ts.asc())
         )).scalars().all()
+        all_query_rows = (await session.execute(select(QueryStatus))).scalars().all()
 
     events_by_monitor: dict[int, list] = {}
     for e in all_events:
         events_by_monitor.setdefault(e.monitor_id, []).append(e)
+    queries_by_monitor: dict[int, list] = {}
+    for q in all_query_rows:
+        queries_by_monitor.setdefault(q.monitor_id, []).append(q)
 
     result = []
     for m in monitors:
+        if m.url not in ENDPOINTS:
+            continue  # retired monitor: history kept, no longer shown
         if m.last_state_change_ts is not None:
             change_str = datetime.fromtimestamp(m.last_state_change_ts, tz=pacific).strftime("%b %-d, %-I:%M %p %Z")
         else:
@@ -647,11 +825,14 @@ async def status():
             "id": m.id,
             "url": m.url,
             "is_up": m.is_up,
+            "health": m.health,
             "last_state_change_ts": m.last_state_change_ts or 0,
             "last_state_change_str": change_str,
             "code_version": m.code_version,
+            "queries": load_query_statuses(queries_by_monitor.get(m.id, []), m.url, pacific, now_ts),
             "uptime_24h": overall_uptime(hourly),
-            "bars": [{"date": d["date"], "status": d["status"], "uptime": d["uptime"]} for d in hourly],
+            "bars": [{"date": d["date"], "status": d["status"], "uptime": d["uptime"],
+                      "degraded_seconds": d["degraded_seconds"]} for d in hourly],
         })
 
     # Display in ENDPOINTS order regardless of DB insertion order (unknown URLs last).
@@ -681,6 +862,10 @@ async def api_monitor_detail(monitor_id: int):
             select(StateEvent)
             .where(StateEvent.monitor_id == monitor_id, StateEvent.changed_at_ts >= one_day_ago_ts)
             .order_by(StateEvent.changed_at_ts.desc())
+        )).scalars().all()
+
+        query_rows = (await session.execute(
+            select(QueryStatus).where(QueryStatus.monitor_id == monitor_id)
         )).scalars().all()
 
     # Calculate stats
@@ -718,16 +903,18 @@ async def api_monitor_detail(monitor_id: int):
         recent_events.append({
             "timestamp": event_dt.strftime('%m/%d %I:%M:%S %p %Z'),
             "is_up": e.is_up,
-            "status": "UP" if e.is_up else "DOWN"
+            "status": event_status(e).upper()
         })
 
     return {
         "id": monitor.id,
         "url": monitor.url,
         "is_up": monitor.is_up,
+        "health": monitor.health,
         "last_state_change_ts": monitor.last_state_change_ts or 0,
         "last_state_change_str": change_str,
         "code_version": monitor.code_version,
+        "queries": load_query_statuses(query_rows, monitor.url, pacific, now_ts),
         "avg_latency_ms": avg_lat,
         "uptime_24h_percent": uptime_pct,
         "time_in_current_status": time_in_status_str,
@@ -742,7 +929,7 @@ async def checker_loop():
             # so we don't hold a read transaction open while run_check() writes.
             async with AsyncSessionLocal() as session:
                 monitors = (await session.execute(select(Monitor))).scalars().all()
-                targets = [(m.id, m.url) for m in monitors]
+                targets = [(m.id, m.url) for m in monitors if m.url in ENDPOINTS]
             print(f"[CHECKER] Running checks for {len(targets)} monitors...")
             await asyncio.gather(*[run_check(mid, url) for mid, url in targets])
             print(f"[CHECKER] Checks completed")
@@ -754,16 +941,22 @@ async def checker_loop():
 
 
 async def prune_loop():
-    """Periodically delete raw check samples older than RETENTION_DAYS. Uptime
+    """Periodically delete raw check samples and query failures older than
+    RETENTION_DAYS. Uptime
     history lives in StateEvent and is never pruned."""
     while True:
         try:
             cutoff = datetime.now(ZoneInfo("UTC")) - timedelta(days=RETENTION_DAYS)
             async with AsyncSessionLocal() as session:
                 res = await session.execute(delete(Check).where(Check.checked_at < cutoff))
+                qres = await session.execute(
+                    delete(QueryFailure).where(QueryFailure.checked_ts < int(cutoff.timestamp()))
+                )
                 await session.commit()
                 if res.rowcount:
                     print(f"[PRUNE] Deleted {res.rowcount} checks older than {RETENTION_DAYS}d")
+                if qres.rowcount:
+                    print(f"[PRUNE] Deleted {qres.rowcount} query failures older than {RETENTION_DAYS}d")
         except Exception as e:
             print(f"[PRUNE ERROR] {type(e).__name__}: {e}")
         await asyncio.sleep(PRUNE_INTERVAL)
@@ -840,23 +1033,217 @@ async def fetch_code_version(url: str) -> str | None:
         return None
 
 
-async def probe_arax_query_latency(url: str) -> int | None:
-    """Fire the canned TRAPI reasoning query at an ARAX node and return the
-    round-trip time in ms, or None if the query errored/timed out. This runs the
-    real reasoner end-to-end purely to measure latency — it never influences the
-    node's up/down verdict."""
+def summarize_response(r: httpx.Response) -> str:
+    """Readable body of a failed response for the failure log. TRAPI responses
+    are cut down to their status, description, result count and WARNING/ERROR
+    logs (the full knowledge graph isn't useful here)."""
+    try:
+        data = r.json()
+    except Exception:
+        return (r.text or "")[:RESPONSE_SNIPPET_MAX]
+    if isinstance(data, dict) and ("message" in data or "logs" in data):
+        msg = data.get("message")
+        logs = [
+            entry for entry in (data.get("logs") or [])
+            if isinstance(entry, dict) and str(entry.get("level", "")).upper() in ("ERROR", "WARNING")
+        ]
+        data = {
+            "status": data.get("status"),
+            "description": data.get("description"),
+            "results": len(msg.get("results") or []) if isinstance(msg, dict) else None,
+            "logs": logs[:25],
+        }
+    return json.dumps(data, indent=2, default=str)[:RESPONSE_SNIPPET_MAX]
+
+
+async def probe_arax_query(url: str, kind: str):
+    """Fire the canned TRAPI query of `kind` at an ARAX node. Returns
+    (latency_ms, error, http_status, response): latency is None if no 200 came
+    back; error is None when the query returned a 200 with at least one result,
+    else a short reason, in which case `response` holds the body for the
+    failure log."""
+    # `submitter` identifies these probe queries in ARAX's logs so they can be
+    # told apart from real user traffic.
+    body = {"submitter": "UpTimeARAX", "message": {"query_graph": QUERY_GRAPHS[kind]}}
     start = time.perf_counter()
     try:
         r = await http_client.post(
             url + ARAX_QUERY_SUFFIX,
-            json=ARAX_QUERY_BODY,
-            timeout=ARAX_QUERY_TIMEOUT,
+            json=body,
+            timeout=QUERY_TIMEOUTS[kind],
         )
-        if r.status_code != 200:
-            return None
-        return int((time.perf_counter() - start) * 1000)
+    except Exception as ex:
+        return None, f"query failed: {type(ex).__name__}", None, repr(ex)
+    elapsed = int((time.perf_counter() - start) * 1000)
+    try:
+        data = r.json()
     except Exception:
-        return None
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if r.status_code != 200:
+        desc = str(data.get("description") or data.get("detail") or "").strip()
+        error = f"HTTP {r.status_code}" + (f": {desc[:200]}" if desc else "")
+        return None, error, r.status_code, summarize_response(r)
+    results = (data.get("message") or {}).get("results")
+    if not results:
+        return elapsed, "query returned no results", r.status_code, summarize_response(r)
+    return elapsed, None, r.status_code, None
+
+
+def compute_health(is_up, url: str, query_rows) -> tuple[str | None, list[str]]:
+    """(health, failing_kinds) for a monitor. health is None before the first
+    check, else "down" (red), "degraded" (yellow) or "up" (green)."""
+    kinds = query_kinds_for(url)
+    ok_by_kind = {r.kind: r.ok for r in query_rows}
+    failing = [k for k in kinds if ok_by_kind.get(k) is False]
+    if is_up is None:
+        return None, failing
+    if not is_up:
+        return "down", failing
+    if url in FULL_PROBE_ENDPOINTS and failing and len(failing) == len(kinds):
+        return "down", failing
+    return ("degraded" if failing else "up"), failing
+
+
+async def apply_health(session, m: Monitor):
+    """Recompute m's health from its liveness and query rows; on a change,
+    record a StateEvent. Alerting is separate (maybe_alert) so it can wait for
+    a recheck to finish."""
+    rows = (await session.execute(
+        select(QueryStatus).where(QueryStatus.monitor_id == m.id)
+    )).scalars().all()
+    new, _ = compute_health(m.is_up, m.url, rows)
+    if new == m.health:
+        return
+    m.health = new
+    m.last_state_change_ts = int(time.time())
+    session.add(StateEvent(
+        monitor_id=m.id,
+        is_up=new != "down",
+        status=new,
+        changed_at_ts=m.last_state_change_ts,
+    ))
+
+
+async def maybe_alert(monitor_id: int):
+    """Post "<url> DOWN: <cause>", "<url> DEGRADED: <cause>" or "<url> UP" when
+    a monitor's health differs from what was last announced. Held while a
+    background recheck is running, so a node whose queries recover one by one
+    produces a single message once all of them are in."""
+    if monitor_id in _extended_inflight:
+        return
+    async with _health_locks[monitor_id]:
+        async with AsyncSessionLocal() as session:
+            m = await session.get(Monitor, monitor_id)
+            if not m:
+                return
+            prev = _alerted_health.get(monitor_id)
+            if m.health == prev:
+                return
+            _alerted_health[monitor_id] = m.health
+            if prev is None or m.health is None:
+                return  # first state after a monitor is added isn't news
+            rows = (await session.execute(
+                select(QueryStatus).where(QueryStatus.monitor_id == monitor_id)
+            )).scalars().all()
+            last_check = (await session.execute(
+                select(Check).where(Check.monitor_id == monitor_id).order_by(Check.id.desc()).limit(1)
+            )).scalars().first()
+            url, health, is_up = m.url, m.health, m.is_up
+
+    _, failing = compute_health(is_up, url, rows)
+    errors = {r.kind: r.error for r in rows}
+    failing_desc = "; ".join(f"{QUERY_LABELS[k]} failing ({errors.get(k) or 'no detail'})" for k in failing)
+    if health == "up":
+        text = f"{url} UP"
+    elif health == "degraded":
+        text = f"{url} DEGRADED: {failing_desc}"
+    elif not is_up:
+        if last_check and last_check.status_code:
+            cause = f"HTTP {last_check.status_code}"
+        elif last_check and last_check.error_message:
+            cause = last_check.error_message.split("(", 1)[0]  # e.g. ConnectTimeout
+        else:
+            cause = "no response"
+        text = f"{url} DOWN: status check failing ({cause})"
+    else:
+        text = f"{url} DOWN: all queries failing — {failing_desc}"
+    await send_slack_message(text, url)
+
+
+async def record_query_result(monitor_id: int, url: str, kind: str, latency_ms: int | None,
+                              error: str | None, http_status: int | None, response: str | None):
+    """Store a probe result, update the node's health and schedule the next
+    probe of this kind. Callers alert via maybe_alert() once their round of
+    probes is done."""
+    now = int(time.time())
+    failed = error is not None
+    async with _health_locks[monitor_id]:
+        async with AsyncSessionLocal() as session:
+            row = (await session.execute(
+                select(QueryStatus).where(QueryStatus.monitor_id == monitor_id, QueryStatus.kind == kind)
+            )).scalars().first()
+            if row is None:
+                row = QueryStatus(monitor_id=monitor_id, kind=kind, consecutive_failures=0)
+                session.add(row)
+            if failed:
+                row.consecutive_failures = (row.consecutive_failures or 0) + 1
+                if row.consecutive_failures >= QUERY_FAIL_THRESHOLD:
+                    row.ok = False
+                session.add(QueryFailure(
+                    monitor_id=monitor_id, kind=kind, checked_ts=now, http_status=http_status,
+                    latency_ms=latency_ms, error=error, response=response,
+                ))
+            else:
+                row.consecutive_failures = 0
+                row.ok = True
+            row.error, row.latency_ms, row.checked_ts = error, latency_ms, now
+
+            m = await session.get(Monitor, monitor_id)
+            if m:
+                await apply_health(session, m)
+            await session.commit()
+
+    _next_probe[(monitor_id, kind)] = time.monotonic() + (QUERY_RETRY_INTERVAL if failed else QUERY_INTERVAL)
+
+
+async def run_extended_probes(monitor_id: int, url: str, kinds: list[str]):
+    """xDTD / xCRG / Pathfinder, one after another so the node isn't hit with
+    several heavy inferred queries at once."""
+    try:
+        for kind in kinds:
+            result = await probe_arax_query(url, kind)
+            await record_query_result(monitor_id, url, kind, *result)
+    except Exception as e:
+        print(f"[PROBE ERROR] {url}: {type(e).__name__}: {e}")
+    finally:
+        _extended_inflight.discard(monitor_id)
+    await maybe_alert(monitor_id)
+
+
+def load_query_statuses(rows, url: str, tz, now_ts: int) -> list[dict]:
+    """Badge data for a monitor, in QUERY_LABELS order; kinds not yet probed
+    come back with ok=None."""
+    by_kind = {r.kind: r for r in rows}
+    out = []
+    for kind in query_kinds_for(url):
+        r = by_kind.get(kind)
+        out.append({
+            "kind": kind,
+            "label": QUERY_LABELS[kind],
+            "ok": r.ok if r else None,
+            "error": r.error if r else None,
+            "latency_ms": r.latency_ms if r else None,
+            # Failed at least once but not yet confirmed failing.
+            "rechecking": bool(r and r.ok is not False and (r.consecutive_failures or 0) > 0),
+            "stale": bool(r and now_ts - r.checked_ts > QUERY_STALE_AFTER),
+            "checked_str": (
+                datetime.fromtimestamp(r.checked_ts, tz=tz).strftime("%b %-d, %-I:%M %p %Z")
+                if r else None
+            ),
+        })
+    return out
 
 
 async def run_check(monitor_id: int, url: str):
@@ -864,6 +1251,7 @@ async def run_check(monitor_id: int, url: str):
     code = 0
     error_message = None
     new_code_version = None
+    response_body = None  # kept only when the check fails
     # Latency sample for this check (ms). None means "no sample this check" — the
     # column is nullable and downstream latency stats skip None rows.
     dur = None
@@ -878,6 +1266,8 @@ async def run_check(monitor_id: int, url: str):
             code = r.status_code
             if code == 200:
                 new_code_version = parse_arax_version(r.json())
+            else:
+                response_body = (r.text or "")[:RESPONSE_SNIPPET_MAX]
         except Exception as ex:
             error_message = repr(ex)
     else:
@@ -886,6 +1276,8 @@ async def run_check(monitor_id: int, url: str):
         try:
             r = await http_client.get(url, follow_redirects=True, timeout=10.0)
             code = r.status_code
+            if code != 200:
+                response_body = (r.text or "")[:RESPONSE_SNIPPET_MAX]
         except Exception as ex:
             error_message = repr(ex)
         dur = int((time.perf_counter() - start) * 1000)
@@ -898,12 +1290,28 @@ async def run_check(monitor_id: int, url: str):
         now_mono = time.monotonic()
 
         if is_arax:
-            # Measure latency from a real /query, at most once per QUERY_INTERVAL.
-            # Throttle is stamped before awaiting so a slow reasoner isn't hit
-            # every poll; the query result never affects up/down.
-            if now_mono - _last_query_probe.get(monitor_id, 0.0) >= QUERY_INTERVAL:
-                _last_query_probe[monitor_id] = now_mono
-                dur = await probe_arax_query_latency(url)
+            kinds = query_kinds_for(url)
+            # Coming back from DOWN: re-run every query now, so the node's color
+            # reflects its current state rather than results from before the outage.
+            if _last_status_up.get(monitor_id) is False:
+                for kind in kinds:
+                    _next_probe.pop((monitor_id, kind), None)
+            due = [k for k in kinds if now_mono >= _next_probe.get((monitor_id, k), 0.0)]
+            # Stamp before awaiting so a slow reasoner isn't re-hit every poll;
+            # record_query_result sets the real next time once a result is in.
+            extended = [k for k in due if k != "lookup"]
+            if extended and monitor_id not in _extended_inflight:
+                for kind in extended:
+                    _next_probe[(monitor_id, kind)] = now_mono + QUERY_INTERVAL
+                _extended_inflight.add(monitor_id)
+                task = asyncio.create_task(run_extended_probes(monitor_id, url, extended))
+                _probe_tasks.add(task)
+                task.add_done_callback(_probe_tasks.discard)
+            if "lookup" in due:
+                _next_probe[(monitor_id, "lookup")] = now_mono + QUERY_INTERVAL
+                lookup = await probe_arax_query(url, "lookup")
+                dur = lookup[0]
+                await record_query_result(monitor_id, url, "lookup", *lookup)
         else:
             # Non-ARAX build metadata via /code_version, throttled per monitor.
             if now_mono - _last_code_version_fetch.get(monitor_id, 0.0) >= CODE_VERSION_REFRESH:
@@ -915,76 +1323,61 @@ async def run_check(monitor_id: int, url: str):
             _cert_expiry[monitor_id] = await asyncio.to_thread(_get_cert_expiry_ts, url)
             _last_cert_fetch[monitor_id] = now_mono
 
-    async with AsyncSessionLocal() as session:
-        m = await session.get(Monitor, monitor_id)
-        if not m:
-            return
+    async with _health_locks[monitor_id]:
+        async with AsyncSessionLocal() as session:
+            m = await session.get(Monitor, monitor_id)
+            if not m:
+                return
 
-        previous_state = m.is_up
+            previous_state = m.is_up
 
-        # count recent consecutive failures
-        recent_checks = (
-            await session.execute(
-                select(Check)
-                .where(Check.monitor_id == monitor_id)
-                .order_by(Check.id.desc())
-                .limit(FAIL_THRESHOLD - 1)
-            )
-        ).scalars().all()
+            # count recent consecutive failures
+            recent_checks = (
+                await session.execute(
+                    select(Check)
+                    .where(Check.monitor_id == monitor_id)
+                    .order_by(Check.id.desc())
+                    .limit(FAIL_THRESHOLD - 1)
+                )
+            ).scalars().all()
 
-        consecutive_failures = 0
-        if not is_success:
-            consecutive_failures = 1
-            for c in recent_checks:
-                if c.status_code != 200:
-                    consecutive_failures += 1
-                else:
-                    break
+            consecutive_failures = 0
+            if not is_success:
+                consecutive_failures = 1
+                for c in recent_checks:
+                    if c.status_code != 200:
+                        consecutive_failures += 1
+                    else:
+                        break
 
-        confirmed_up = is_success
-        confirmed_down = (not is_success) and consecutive_failures >= FAIL_THRESHOLD
+            confirmed_up = is_success
+            confirmed_down = (not is_success) and consecutive_failures >= FAIL_THRESHOLD
 
-        if new_code_version is not None:
-            m.code_version = new_code_version
+            if new_code_version is not None:
+                m.code_version = new_code_version
 
-        # first check
-        if previous_state is None:
-            m.is_up = confirmed_up
-            m.last_state_change_ts = int(time.time())
-            session.add(StateEvent(
+            if previous_state is None:
+                m.is_up = confirmed_up  # first check
+            elif previous_state and confirmed_down:
+                m.is_up = False  # DOWN only after FAIL_THRESHOLD failures
+            elif not previous_state and confirmed_up:
+                m.is_up = True  # back UP immediately on success
+
+            # Health combines liveness with the query checks; it owns the state
+            # events and last_state_change_ts.
+            await apply_health(session, m)
+
+            session.add(Check(
                 monitor_id=monitor_id,
-                is_up=confirmed_up,
-                changed_at_ts=m.last_state_change_ts
+                status_code=code,
+                response_time_ms=dur,
+                error_message=error_message,
+                code_version=m.code_version,
+                response_body=response_body,
             ))
 
-        # transition to DOWN (only after threshold)
-        elif previous_state and confirmed_down:
-            m.is_up = False
-            m.last_state_change_ts = int(time.time())
-            session.add(StateEvent(
-                monitor_id=monitor_id,
-                is_up=False,
-                changed_at_ts=m.last_state_change_ts
-            ))
-            await send_slack_message(f"{url} is DOWN", url)
+            await session.commit()
+            _last_status_up[monitor_id] = m.is_up
 
-        # transition to UP immediately on success
-        elif not previous_state and confirmed_up:
-            m.is_up = True
-            m.last_state_change_ts = int(time.time())
-            session.add(StateEvent(
-                monitor_id=monitor_id,
-                is_up=True,
-                changed_at_ts=m.last_state_change_ts
-            ))
-            await send_slack_message(f"{url} is BACK UP", url)
-
-        session.add(Check(
-            monitor_id=monitor_id,
-            status_code=code,
-            response_time_ms=dur,
-            error_message=error_message,
-            code_version=m.code_version
-        ))
-
-        await session.commit()
+    # Held (and sent by run_extended_probes instead) if a recheck is still running.
+    await maybe_alert(monitor_id)

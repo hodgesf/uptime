@@ -28,7 +28,18 @@
         .stat .v.up { color: var(--up); }
         .stat .v.down { color: var(--down); }
         .stat .v.pending { color: var(--muted); }
-        .stat .v.warn { color: var(--degraded); }
+        .stat .v.warn, .stat .v.degraded { color: var(--degraded); }
+        .queries { padding: 16px 20px; margin-bottom: 16px; }
+        .queries h4 { margin: 0 0 10px; font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; font-family: var(--font-body); }
+        .qrow { display: flex; align-items: baseline; gap: 12px; padding: 7px 0; border-top: 1px solid var(--border); font-size: 13px; }
+        .qrow:first-of-type { border-top: none; }
+        .qrow .qbadge { flex: none; min-width: 92px; }
+        .qrow .qdetail { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+        .qrow .qdetail.fail { color: var(--degraded); }
+        table.logs td.src { white-space: nowrap; font-weight: 600; }
+        table.logs td.when { white-space: nowrap; color: var(--muted); }
+        table.logs details summary { cursor: pointer; color: var(--degraded); }
+        table.logs pre { margin: 8px 0 0; padding: 10px; max-height: 320px; overflow: auto; background: var(--surface-2); border-radius: 6px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
         @media (max-width: 680px) { .stats { grid-template-columns: repeat(2, 1fr); } }
 
         details.panel { margin-bottom: 12px; padding: 4px 20px; }
@@ -60,7 +71,7 @@
         <div class="strip">
             <div class="bars">
                 {% for d in daily %}
-                <div class="bar {{ d.status }}" title="{{ d.date }} — {% if d.uptime is none %}No data{% else %}{{ d.uptime }}% uptime{% endif %}"></div>
+                <div class="bar {{ d.status }}" title="{{ d.date }} — {% if d.uptime is none %}No data{% else %}{{ d.uptime }}% uptime{% if d.degraded_seconds %} · degraded {{ (d.degraded_seconds / 60) | round | int }}m{% endif %}{% endif %}"></div>
                 {% endfor %}
             </div>
             <div class="strip-foot"><span>30 days ago</span><span>Today</span></div>
@@ -78,7 +89,7 @@
             <div class="v {{ status_class }}">{{ status_label }}</div>
         </div>
         <div class="stat card">
-            <h4>{% if not initialized %}Duration{% elif status_class == 'down' %}Down for{% else %}Up for{% endif %}</h4>
+            <h4>{% if not initialized %}Duration{% elif status_class == 'down' %}Down for{% elif status_class == 'degraded' %}Degraded for{% else %}Up for{% endif %}</h4>
             <div class="v num" id="stat-duration">{% if initialized %}{{ time_in_status_str }}{% else %}—{% endif %}</div>
         </div>
         <div class="stat card">
@@ -109,6 +120,25 @@
         </div>
     </div>
 
+    {% if queries %}
+    <div class="queries card">
+        <h4>Query checks</h4>
+        {% for q in queries %}
+        <div class="qrow">
+            <span class="qbadge {% if q.ok is none %}{% elif q.stale %}stale{% elif q.ok %}ok{% else %}fail{% endif %}">{{ q.label }}</span>
+            <span class="qdetail{% if q.ok is false or q.rechecking %} fail{% endif %}">
+                {% if q.ok is none and not q.rechecking %}Not checked yet
+                {% elif q.rechecking %}Failed once ({{ q.error }}) — rechecking
+                {% elif q.ok %}Passing{% if q.latency_ms is not none %} · {{ q.latency_ms }} ms{% endif %}
+                {% else %}{{ q.error }}{% endif %}
+                {% if q.checked_str %} · {{ q.checked_str }}{% endif %}
+                {% if q.stale %} · stale{% endif %}
+            </span>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
     {{ downtime_html | safe }}
 
     <details class="panel card">
@@ -118,13 +148,29 @@
         </div>
     </details>
 
-    <details class="panel card">
-        <summary>Request log · last 24h</summary>
+    <details class="panel card"{% if failure_log %} open{% endif %}>
+        <summary>Failure log · last {{ failure_log_days }} days{% if failure_log %} ({{ failure_log | length }}){% endif %}</summary>
         <div class="panel-body">
+            {% if failure_log %}
             <table class="logs">
-                <thead><tr><th>Time (PT)</th><th>Code</th></tr></thead>
-                <tbody>{% if initialized %}{{ raw_logs_html | safe }}{% else %}<tr><td colspan="2" style="color: var(--muted);">Awaiting first check…</td></tr>{% endif %}</tbody>
+                <thead><tr><th>Time (PT)</th><th>Check</th><th>Result</th></tr></thead>
+                <tbody>
+                {% for f in failure_log %}
+                <tr>
+                    <td class="when">{{ f.when }}{% if f.count > 1 %} · ×{{ f.count }}{% endif %}</td>
+                    <td class="src">{{ f.source }}</td>
+                    <td>
+                        {% if f.response %}
+                        <details><summary>{{ f.summary }}</summary><pre>{{ f.response }}</pre></details>
+                        {% else %}{{ f.summary }}{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
             </table>
+            {% else %}
+            <p style="color: var(--muted); margin: 4px 0;">No failed checks.</p>
+            {% endif %}
         </div>
     </details>
 {% endblock %}
