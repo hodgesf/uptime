@@ -46,14 +46,28 @@ ARAX_ENDPOINTS = {
     "https://arax.ncats.io/devED",
     "https://arax.ncats.io/devLM",
 }
-ARAX_STATUS_SUFFIX = "/api/arax/v1.4/status?mode=site_config"
+# ARAX API version in each node's URL path (/api/arax/<version>/...). Nodes not
+# listed use ARAX_DEFAULT_API_VERSION; devED runs the TRAPI 2.0 / FastAPI build.
+ARAX_DEFAULT_API_VERSION = "v1.4"
+ARAX_API_VERSIONS = {
+    "https://arax.ncats.io/devED": "v2.0",
+}
+
+
+def arax_api(url: str) -> str:
+    return f"{url}/api/arax/{ARAX_API_VERSIONS.get(url, ARAX_DEFAULT_API_VERSION)}"
+
+
+def arax_status_url(url: str) -> str:
+    return arax_api(url) + "/status?mode=site_config"
+
+
 # ARAX nodes whose status API is broken (returns 500 while the site and its
 # queries work): liveness falls back to a plain root GET. Their build version is
 # still tried via the status API, throttled, so it reappears once that's fixed.
 ROOT_LIVENESS_ENDPOINTS = {
     "https://arax.transltr.io",
 }
-ARAX_QUERY_SUFFIX = "/api/arax/v1.4/query"
 
 # Once per QUERY_INTERVAL each ARAX node gets real TRAPI reasoning queries that
 # check the reasoner actually works: a 200 with a non-empty message.results
@@ -181,6 +195,10 @@ _probe_tasks: set[asyncio.Task] = set()
 _last_status_up: dict[int, bool] = {}
 # Last health each monitor was alerted as; Slack only hears about changes.
 _alerted_health: dict[int, str | None] = {}
+# The queries that were failing when each monitor's last alert went out; the
+# next alert reports what changed relative to this. Missing = unknown (e.g.
+# after a restart), in which case it's re-learned silently.
+_alerted_failing: dict[int, set[str]] = {}
 # Serializes health updates per monitor (run_check and background probes both
 # write them).
 _health_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -996,7 +1014,7 @@ async def fetch_code_version(url: str) -> str | None:
     """Fetch a display version string for a monitor, or None. ARAX endpoints use
     the ARAX status API; everyone else uses {url}/code_version."""
     if url in ARAX_ENDPOINTS:
-        return await fetch_arax_version(url + ARAX_STATUS_SUFFIX)
+        return await fetch_arax_version(arax_status_url(url))
     try:
         cv = await http_client.get(f"{url}/code_version", timeout=5.0)
         if cv.status_code != 200:
@@ -1074,7 +1092,7 @@ async def probe_arax_query(url: str, kind: str):
     start = time.perf_counter()
     try:
         r = await http_client.post(
-            url + ARAX_QUERY_SUFFIX,
+            arax_api(url) + "/query",
             json=body,
             timeout=QUERY_TIMEOUTS[kind],
         )
@@ -1132,11 +1150,24 @@ async def apply_health(session, m: Monitor):
     ))
 
 
+def _join_labels(kinds) -> str:
+    """'xDTD', 'xDTD and Pathfinder', 'Lookup, xDTD and Pathfinder'."""
+    names = [QUERY_LABELS[k] for k in QUERY_LABELS if k in kinds]
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 async def maybe_alert(monitor_id: int):
-    """Post "<url> DOWN: <cause>", "<url> DEGRADED: <cause>" or "<url> UP" when
-    a monitor's health differs from what was last announced. Held while a
-    background recheck is running, so a node whose queries recover one by one
-    produces a single message once all of them are in."""
+    """Send one Slack message when a monitor's health, or the set of queries
+    failing on a degraded monitor, differs from what was last announced:
+        DOWN: <cause>                      (-> red)
+        UP                                 (red -> green)
+        UP but DEGRADED: <failing>         (red -> yellow)
+        DEGRADED: <failing>                (green -> yellow)
+        DEGRADED: X restored · now also failing: Y · still failing: Z
+                                           (yellow, failing queries changed)
+        RESTORED: X is returning successfully again   (yellow -> green)
+    Held while a background recheck is running, so a recheck in which several
+    queries change produces a single message once all of them are in."""
     if monitor_id in _extended_inflight:
         return
     async with _health_locks[monitor_id]:
@@ -1145,11 +1176,10 @@ async def maybe_alert(monitor_id: int):
             if not m:
                 return
             prev = _alerted_health.get(monitor_id)
-            if m.health == prev:
+            # A degraded node can change which queries fail without changing
+            # health, so it's always re-examined; anything else only on change.
+            if m.health == prev and m.health != "degraded":
                 return
-            _alerted_health[monitor_id] = m.health
-            if prev is None or m.health is None:
-                return  # first state after a monitor is added isn't news
             rows = (await session.execute(
                 select(QueryStatus).where(QueryStatus.monitor_id == monitor_id)
             )).scalars().all()
@@ -1158,13 +1188,45 @@ async def maybe_alert(monitor_id: int):
             )).scalars().first()
             url, health, is_up = m.url, m.health, m.is_up
 
-    _, failing = compute_health(is_up, url, rows)
+        _, failing_list = compute_health(is_up, url, rows)
+        failing = set(failing_list)
+        prev_failing = _alerted_failing.get(monitor_id)
+        _alerted_health[monitor_id] = health
+        _alerted_failing[monitor_id] = failing
+
+    if prev is None or health is None:
+        return  # first state after a monitor is added isn't news
+    if health == prev and (prev_failing is None or failing == prev_failing):
+        return  # nothing changed (or re-learning the failing set after a restart)
+
     errors = {r.kind: r.error for r in rows}
-    failing_desc = "; ".join(f"{QUERY_LABELS[k]} failing ({errors.get(k) or 'no detail'})" for k in failing)
+
+    def describe(kinds, suffix="") -> str:
+        """'Pathfinder<suffix> (HTTP 500: ...); xDTD<suffix> (...)'"""
+        return "; ".join(
+            f"{QUERY_LABELS[k]}{suffix} ({errors.get(k) or 'no detail'})" for k in QUERY_LABELS if k in kinds
+        )
+
     if health == "up":
-        text = f"{url} UP"
+        if prev == "degraded":
+            what = f"{_join_labels(prev_failing)} {'is' if len(prev_failing) == 1 else 'are'}" \
+                if prev_failing else "all queries are"
+            text = f"{url} RESTORED: {what} returning successfully again"
+        else:
+            text = f"{url} UP"
     elif health == "degraded":
-        text = f"{url} DEGRADED: {failing_desc}"
+        if prev == "degraded" and prev_failing is not None:
+            parts = []
+            if prev_failing - failing:
+                parts.append(f"{_join_labels(prev_failing - failing)} restored")
+            if failing - prev_failing:
+                parts.append(f"now also failing: {describe(failing - prev_failing)}")
+            if failing & prev_failing:
+                parts.append(f"still failing: {describe(failing & prev_failing)}")
+            text = f"{url} DEGRADED: {' · '.join(parts)}"
+        else:
+            lead = "UP but DEGRADED" if prev == "down" else "DEGRADED"
+            text = f"{url} {lead}: {describe(failing, ' failing')}"
     elif not is_up:
         if last_check and last_check.status_code:
             cause = f"HTTP {last_check.status_code}"
@@ -1175,7 +1237,7 @@ async def maybe_alert(monitor_id: int):
         check = "site check" if url in ROOT_LIVENESS_ENDPOINTS else "status check"
         text = f"{url} DOWN: {check} failing ({cause})"
     else:
-        text = f"{url} DOWN: all queries failing — {failing_desc}"
+        text = f"{url} DOWN: all queries failing — {describe(failing, ' failing')}"
     await send_slack_message(text, url)
 
 
@@ -1276,7 +1338,7 @@ async def run_check(monitor_id: int, url: str):
         # (not just the static frontend). The same payload carries the version.
         try:
             r = await http_client.get(
-                url + ARAX_STATUS_SUFFIX, follow_redirects=True, timeout=10.0
+                arax_status_url(url), follow_redirects=True, timeout=10.0
             )
             code = r.status_code
             if code == 200:
@@ -1306,7 +1368,7 @@ async def run_check(monitor_id: int, url: str):
 
         if url in ROOT_LIVENESS_ENDPOINTS:
             if now_mono - _last_code_version_fetch.get(monitor_id, 0.0) >= CODE_VERSION_REFRESH:
-                new_code_version = await fetch_arax_version(url + ARAX_STATUS_SUFFIX)
+                new_code_version = await fetch_arax_version(arax_status_url(url))
                 _last_code_version_fetch[monitor_id] = now_mono
 
         if is_arax:
