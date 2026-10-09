@@ -47,10 +47,11 @@ ARAX_ENDPOINTS = {
     "https://arax.ncats.io/devLM",
 }
 # ARAX API version in each node's URL path (/api/arax/<version>/...). Nodes not
-# listed use ARAX_DEFAULT_API_VERSION; devED runs the TRAPI 2.0 / FastAPI build.
+# listed use ARAX_DEFAULT_API_VERSION; these run the TRAPI 2.0 / FastAPI build.
 ARAX_DEFAULT_API_VERSION = "v1.4"
 ARAX_API_VERSIONS = {
     "https://arax.ncats.io/devED": "v2.0",
+    "https://arax.ncats.io/beta": "v2.0",
 }
 
 
